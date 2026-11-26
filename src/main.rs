@@ -17,12 +17,14 @@ fn main() -> eframe::Result<()> {
     let mut shot = None;
     let mut tab = None;
     let mut plot = false;
+    let mut save = false;
     let mut popup: Option<(f64, f64)> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => shot = args.next().map(PathBuf::from),
             "--tab" => tab = args.next().and_then(|t| app::Tab::from_name(&t)),
             "--plot" => plot = true,
+            "--save" => save = true,
             "--popup" => popup = args.next().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))),
             "--help" | "-h" => {
                 println!("radio-sites [--tab sites|antenna|coverage] [--plot] [--screenshot out.png]");
@@ -46,6 +48,9 @@ fn main() -> eframe::Result<()> {
         options.clone(),
         Box::new(move |cc| {
             let mut a = app::App::new(cc, tab, shot.clone());
+            if save {
+                a.save_on_start();
+            }
             if plot {
                 a.plot_on_start();
             }

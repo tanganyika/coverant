@@ -76,11 +76,43 @@ pub struct Site {
     pub notes: String,
     pub colour: [u8; 3],
     pub station: Station,
+    /// download the terrain around the site when it is saved
+    pub cache_terrain: bool,
+    /// how far out (km); also the default radius of this site's coverage plots
+    pub cache_radius_km: f64,
+    /// a coverage radius chosen on the Coverage tab, instead of the default
+    pub plot_radius_km: Option<f64>,
 }
 
 impl Default for Site {
     fn default() -> Self {
-        Site { id: String::new(), name: "New site".into(), lat: 0.0, lon: 0.0, ground_m: None, notes: String::new(), colour: [211, 47, 47], station: Station::default() }
+        Site {
+            id: String::new(),
+            name: "New site".into(),
+            lat: 0.0,
+            lon: 0.0,
+            ground_m: None,
+            notes: String::new(),
+            colour: [211, 47, 47],
+            station: Station::default(),
+            cache_terrain: true,
+            cache_radius_km: 40.0,
+            plot_radius_km: None,
+        }
+    }
+}
+
+impl Site {
+    /// Radius for this site's coverage plots: one chosen on the Coverage tab, else the terrain
+    /// download distance, else the general default.
+    pub fn plot_radius(&self, general_km: f64) -> f64 {
+        self.plot_radius_km.unwrap_or(if self.cache_terrain { self.cache_radius_km } else { general_km })
+    }
+
+    /// The area whose terrain belongs to this site: what it downloads and what it plots.
+    pub fn terrain_area_km(&self, general_km: f64) -> f64 {
+        let c = if self.cache_terrain { self.cache_radius_km } else { 0.0 };
+        c.max(self.plot_radius(general_km))
     }
 }
 

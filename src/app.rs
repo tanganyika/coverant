@@ -62,6 +62,13 @@ fn narrow(ctx: &egui::Context) -> bool {
     ctx.content_rect().width() < 720.0
 }
 
+/// Terrain being downloaded after a Save.
+struct CacheJob {
+    done: Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
+    stop: Arc<AtomicBool>,
+}
+
 struct Job {
     site_id: String,
     progress: Arc<Progress>,
@@ -113,6 +120,9 @@ pub struct App {
     height_rx: Rx<((i64, i64), Option<f64>)>,
     height_tx: std::sync::mpsc::Sender<((i64, i64), Option<f64>)>,
     show_about: bool,
+    cache_job: Option<CacheJob>,
+    notes_tx: std::sync::mpsc::Sender<String>,
+    notes_rx: Rx<String>,
     ask_quit: bool,
     quit_anyway: bool,
     frame: u64,
@@ -137,6 +147,7 @@ impl App {
             }
         }
         let (height_tx, height_rx) = channel();
+        let (notes_tx, notes_rx) = channel();
         let threads = rayon::current_num_threads();
         let n = sites.len();
         App {
@@ -168,6 +179,9 @@ impl App {
             height_rx,
             height_tx,
             show_about: false,
+            cache_job: None,
+            notes_tx,
+            notes_rx,
             ask_quit: false,
             quit_anyway: false,
             frame: 0,
@@ -204,9 +218,48 @@ impl App {
             Ok(()) => {
                 self.saved_sites = self.sites.clone();
                 self.status = format!("Saved {} site{}.", self.sites.len(), if self.sites.len() == 1 { "" } else { "s" });
+                self.cache_terrain();
             }
             Err(e) => self.error = Some(e),
         }
+    }
+
+    /// Download, in the background, the terrain around every site that asks for it.
+    fn cache_terrain(&mut self) {
+        let zoom = self.settings.model.terrain_zoom;
+        let areas: Vec<(String, f64, f64, f64)> =
+            self.sites.iter().filter(|s| s.cache_terrain).map(|s| (s.name.clone(), s.lat, s.lon, s.cache_radius_km * 1000.0)).collect();
+        if areas.is_empty() {
+            return;
+        }
+        if let Some(j) = &self.cache_job {
+            j.stop.store(true, Ordering::Relaxed);
+        }
+        let total = areas.iter().map(|a| terrain::tiles_around(a.1, a.2, a.3, zoom).len()).sum();
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (d2, s2, tx) = (done.clone(), stop.clone(), self.notes_tx.clone());
+        std::thread::spawn(move || {
+            let mut fetched = 0;
+            let mut failed = None;
+            for (name, lat, lon, r) in &areas {
+                match terrain::cache_area(*lat, *lon, *r, zoom, &d2, &s2) {
+                    Ok((f, _)) => fetched += f,
+                    Err(e) => failed = Some(format!("Terrain for {name} couldn't all be downloaded: {e}")),
+                }
+                if s2.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            let _ = tx.send(failed.unwrap_or_else(|| {
+                if fetched == 0 {
+                    "Terrain for the saved sites is already cached.".into()
+                } else {
+                    format!("Terrain cached: {fetched} new tile{} downloaded.", if fetched == 1 { "" } else { "s" })
+                }
+            }));
+        });
+        self.cache_job = Some(CacheJob { done, total, stop });
     }
 
     fn undo_changes(&mut self) {
@@ -260,6 +313,18 @@ impl App {
                 self.error = Some(e);
             }
             Coverage::delete(&s.id);
+            // the site's cached terrain, apart from what other sites still use
+            let general = self.settings.model.radius_km;
+            let removed = vec![(s.lat, s.lon, s.terrain_area_km(general) * 1000.0)];
+            let kept: Vec<(f64, f64, f64)> = self.sites.iter().map(|k| (k.lat, k.lon, k.terrain_area_km(general) * 1000.0)).collect();
+            let tx = self.notes_tx.clone();
+            let name = s.name.clone();
+            std::thread::spawn(move || {
+                let n = terrain::cleanup(&removed, &kept);
+                if n > 0 {
+                    let _ = tx.send(format!("Removed {n} cached terrain tile{} that only {name} used.", if n == 1 { "" } else { "s" }));
+                }
+            });
             self.plots.remove(&s.id);
             self.selected = if self.sites.is_empty() { None } else { Some(i.min(self.sites.len() - 1)) };
             self.status = format!("Deleted {}.", s.name);
@@ -301,7 +366,8 @@ impl App {
             return;
         }
         let site = self.sites[i].clone();
-        let settings = self.settings.clone();
+        let mut settings = self.settings.clone();
+        settings.model.radius_km = self.sites[i].plot_radius(self.settings.model.radius_km);
         let terrain = self.terrain(settings.model.terrain_zoom);
         let progress = Progress::new();
         let (tx, rx) = channel();
@@ -585,6 +651,17 @@ impl App {
                     ui.add(egui::DragValue::new(g).speed(0.5).suffix(" m").range(-50.0..=9000.0));
                 }
             });
+            ui.horizontal(|ui| {
+                let s = &mut self.sites[i];
+                ui.checkbox(&mut s.cache_terrain, "Download terrain when saved").on_hover_text("Keeps the terrain around this site on disk, so plots work offline");
+                if s.cache_terrain {
+                    ui.label("out to");
+                    ui.add(egui::DragValue::new(&mut s.cache_radius_km).speed(1.0).range(1.0..=250.0).suffix(" km"));
+                }
+            });
+            if self.sites[i].cache_terrain {
+                ui.label(RichText::new("This distance is also the radius of this site's coverage plots.").small().weak());
+            }
             ui.label("Notes");
             ui.add(egui::TextEdit::multiline(&mut self.sites[i].notes).desired_rows(2).desired_width(f32::INFINITY));
             ui.add_space(6.0);
@@ -742,7 +819,22 @@ impl App {
             let m = &mut self.settings.model;
             egui::Grid::new("plot").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label("Radius");
-                ui.add(egui::DragValue::new(&mut m.radius_km).speed(1.0).range(2.0..=250.0).suffix(" km"));
+                ui.horizontal(|ui| {
+                    let site = &mut self.sites[i];
+                    let mut r = site.plot_radius(m.radius_km);
+                    if ui.add(egui::DragValue::new(&mut r).speed(1.0).range(2.0..=250.0).suffix(" km")).changed() {
+                        if site.cache_terrain || site.plot_radius_km.is_some() {
+                            site.plot_radius_km = Some(r);
+                        } else {
+                            m.radius_km = r;
+                        }
+                    }
+                    if site.cache_terrain && site.plot_radius_km.is_some_and(|p| p != site.cache_radius_km) {
+                        if ui.small_button("↺").on_hover_text(format!("Back to the site's terrain distance ({:.0} km)", site.cache_radius_km)).clicked() {
+                            site.plot_radius_km = None;
+                        }
+                    }
+                });
                 ui.end_row();
                 ui.label("Detail");
                 ui.horizontal(|ui| {
@@ -1075,6 +1167,11 @@ impl App {
         }
     }
 
+    /// For automated tests: press Save at start-up.
+    pub fn save_on_start(&mut self) {
+        self.save();
+    }
+
     /// For automated screenshots: plot the selected site first.
     pub fn plot_on_start(&mut self) {
         self.start_plot();
@@ -1092,6 +1189,15 @@ impl eframe::App for App {
         crate::theme::frame(&ctx);
         self.frame += 1;
         self.poll();
+        while let Ok(n) = self.notes_rx.try_recv() {
+            self.status = n;
+            if !self.status.starts_with("Removed") {
+                self.cache_job = None;
+            }
+        }
+        if self.cache_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         if self.job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
@@ -1110,6 +1216,12 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("⚙ {} threads", self.threads)).color(Color32::from_rgb(60, 90, 160)));
+                if let Some(j) = &self.cache_job {
+                    ui.separator();
+                    let d = j.done.load(Ordering::Relaxed).min(j.total);
+                    ui.add(egui::ProgressBar::new(d as f32 / j.total.max(1) as f32).desired_width(150.0).text(format!("⬇ terrain {d}/{}", j.total)))
+                        .on_hover_text("Downloading the terrain around the saved sites");
+                }
                 ui.separator();
                 if let Some(i) = self.selected {
                     let s = &self.sites[i];

@@ -95,7 +95,7 @@ impl Terrain {
     }
 
     fn path(&self, x: u32, y: u32) -> PathBuf {
-        cache_root().join("terrarium").join(self.zoom.to_string()).join(x.to_string()).join(format!("{y}.png"))
+        tile_path(self.zoom, x, y)
     }
 
     fn load(&self, x: u32, y: u32) -> Result<(std::sync::Arc<Heights>, bool), String> {
@@ -183,6 +183,81 @@ impl Terrain {
     }
 }
 
+fn tile_path(z: u32, x: u32, y: u32) -> PathBuf {
+    cache_root().join("terrarium").join(z.to_string()).join(x.to_string()).join(format!("{y}.png"))
+}
+
+/// The terrain tiles covering a circle around a point.
+pub fn tiles_around(lat: f64, lon: f64, radius_m: f64, zoom: u32) -> Vec<(u32, u32)> {
+    let dlat = (radius_m / EARTH_R).to_degrees() * 1.02 + 0.002;
+    let dlon = dlat / lat.to_radians().cos().max(0.01);
+    let z = zoom as f64;
+    let (xa, ya) = lonlat_to_px(lon - dlon, (lat + dlat).min(85.0), z);
+    let (xb, yb) = lonlat_to_px(lon + dlon, (lat - dlat).max(-85.0), z);
+    let n = 1u32 << zoom;
+    let (tx0, tx1) = ((xa / TILE).floor().max(0.0) as u32, ((xb / TILE).floor() as u32).min(n - 1));
+    let (ty0, ty1) = ((ya / TILE).floor().max(0.0) as u32, ((yb / TILE).floor() as u32).min(n - 1));
+    (ty0..=ty1).flat_map(|ty| (tx0..=tx1).map(move |tx| (tx, ty))).collect()
+}
+
+/// Make sure the terrain tiles around a point are on disk (nothing is decoded).
+/// Returns (tiles downloaded, tiles in the area).
+pub fn cache_area(lat: f64, lon: f64, radius_m: f64, zoom: u32, done: &AtomicUsize, stop: &std::sync::atomic::AtomicBool) -> Result<(usize, usize), String> {
+    let tiles = tiles_around(lat, lon, radius_m, zoom);
+    let total = tiles.len();
+    let fetched = AtomicUsize::new(0);
+    let err = Mutex::new(None);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().map_err(|e| e.to_string())?;
+    pool.install(|| {
+        tiles.par_iter().for_each(|&(x, y)| {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let path = tile_path(zoom, x, y);
+            if !path.exists() {
+                match http_get(&format!("{URL}/{zoom}/{x}/{y}.png")) {
+                    Ok(b) => {
+                        if let Some(dir) = path.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let tmp = path.with_extension("part");
+                        if std::fs::write(&tmp, &b).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+                            fetched.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => *err.lock().unwrap() = Some(e),
+                }
+            }
+            done.fetch_add(1, Ordering::Relaxed);
+        });
+    });
+    if let Some(e) = err.into_inner().unwrap() {
+        return Err(e);
+    }
+    Ok((fetched.into_inner(), total))
+}
+
+/// Delete cached terrain around removed sites, at every zoom level, except tiles that
+/// still lie in the area of a site being kept. Each area is (lat, lon, radius m).
+/// Returns how many tiles were deleted.
+pub fn cleanup(removed: &[(f64, f64, f64)], kept: &[(f64, f64, f64)]) -> usize {
+    let mut n = 0;
+    for zoom in 8..=14u32 {
+        if !cache_root().join("terrarium").join(zoom.to_string()).is_dir() {
+            continue;
+        }
+        let keep: std::collections::HashSet<(u32, u32)> = kept.iter().flat_map(|&(la, lo, r)| tiles_around(la, lo, r, zoom)).collect();
+        for &(la, lo, r) in removed {
+            for t in tiles_around(la, lo, r, zoom) {
+                if !keep.contains(&t) && std::fs::remove_file(tile_path(zoom, t.0, t.1)).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
 /// Stitched heights with bilinear sampling by latitude and longitude.
 pub struct Grid {
     data: Vec<f32>,
@@ -214,5 +289,40 @@ impl Grid {
                 self.sample(la, lo)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_keeps_tiles_other_sites_use() {
+        let dir = std::env::temp_dir().join(format!("rs-cleanup-{}", std::process::id()));
+        // SAFETY: the only test that touches the environment
+        unsafe { std::env::set_var("RADIOSITES_CACHE_DIR", &dir) };
+        let a = (52.33, -0.18, 20_000.0); // deleted
+        let b = (52.50, 0.10, 20_000.0); // kept, overlapping a
+        let c = (51.50, -1.50, 5_000.0); // unrelated cache
+        for &(la, lo, r) in &[a, b, c] {
+            for (x, y) in tiles_around(la, lo, r, 11) {
+                let p = tile_path(11, x, y);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"x").unwrap();
+            }
+        }
+        let ta = tiles_around(a.0, a.1, a.2, 11);
+        let tb: std::collections::HashSet<_> = tiles_around(b.0, b.1, b.2, 11).into_iter().collect();
+        let only_a = ta.iter().filter(|t| !tb.contains(t)).count();
+        assert!(only_a > 0 && only_a < ta.len(), "the areas should overlap partly");
+        let n = cleanup(&[a], &[b]);
+        assert_eq!(n, only_a);
+        for t in &tb {
+            assert!(tile_path(11, t.0, t.1).exists());
+        }
+        for t in tiles_around(c.0, c.1, c.2, 11) {
+            assert!(tile_path(11, t.0, t.1).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
