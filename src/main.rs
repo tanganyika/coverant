@@ -39,7 +39,8 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([800.0, 560.0])
             .with_title("Coverant")
-            .with_app_id("coverant"),
+            .with_app_id("coverant")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/coverant.png")).unwrap_or_default()),
         renderer: if glow { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu },
         ..Default::default()
     };

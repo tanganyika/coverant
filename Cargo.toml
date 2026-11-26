@@ -4,6 +4,24 @@ version = "0.1.0"
 edition = "2024"
 description = "Radio coverage planner: sites, antennas and Longley-Rice coverage maps"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/tanganyika/coverant"
+authors = ["tanganyika"]
+
+[package.metadata.deb]
+section = "hamradio"
+priority = "optional"
+depends = "$auto, libxkbcommon-x11-0, libgl1"
+recommends = "libvulkan1"
+extended-description = """\
+Coverant plans radio sites in the spirit of Radio Mobile: define sites from lat/long, \
+Maidenhead locators or OS grid references, keep a library of antennas, and plot \
+Longley-Rice (ITM) coverage for hand portables, mobiles and base stations over real terrain."""
+assets = [
+    ["target/release/coverant", "usr/bin/", "755"],
+    ["assets/coverant.desktop", "usr/share/applications/", "644"],
+    ["assets/coverant.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["README.md", "usr/share/doc/coverant/", "644"],
+]
 
 [dependencies]
 dirs = "6"

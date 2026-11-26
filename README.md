@@ -45,6 +45,18 @@ processor core.
 **Coming next:** path profiles and link quality between two or more sites, and the radio
 horizon from a site (the *Links* and *Horizon* tabs).
 
+## Installing
+
+Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubuntu package
+(Ubuntu 22.04, Debian 12, Mint 21 or newer), a Linux tarball, a Windows zip and a macOS
+(Apple Silicon) tarball. For the package:
+
+```
+sudo apt install ./coverant_0.1.0-1_amd64.deb
+```
+
+It adds Coverant to the applications menu (under Ham Radio / Science).
+
 ## Building and running
 
 Install Rust from <https://rustup.rs>, then in this folder:
@@ -56,7 +68,8 @@ cargo run --release
 The first build takes a few minutes. The program is then
 `target/release/coverant` (`coverant.exe` on Windows), which can be copied anywhere.
 On Linux, egui needs the usual X11/Wayland libraries (on Debian/Ubuntu:
-`sudo apt install libxkbcommon-x11-0 libgl1`).
+`sudo apt install libxkbcommon-x11-0 libgl1`). `cargo install cargo-deb && cargo deb`
+builds the .deb in `target/debian/`.
 
 Pushing to GitHub builds Windows, macOS and Linux programs with GitHub Actions
 (`.github/workflows/build.yml`); a `v*` tag makes a release with them.

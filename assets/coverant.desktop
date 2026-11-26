@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Coverant
+GenericName=Radio coverage planner
+Comment=Plan radio sites and plot Longley-Rice coverage over real terrain
+Exec=coverant
+Icon=coverant
+Terminal=false
+Categories=HamRadio;Science;Education;
+Keywords=radio;coverage;antenna;amateur;ham;propagation;
+StartupWMClass=coverant
