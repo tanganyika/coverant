@@ -5,7 +5,7 @@ use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
 use crate::itm::CLIMATES;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
-use crate::model::{self, Receiver, Settings, Site, GROUNDS, PRESETS};
+use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, PRESETS};
 use crate::terrain::{self, Terrain};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Sites => "Sites",
-            Tab::Antenna => "Antenna and radio",
+            Tab::Antenna => "Antenna library",
             Tab::Coverage => "Coverage",
             Tab::Links => "Links between sites (next)",
             Tab::Horizon => "Radio horizon (next)",
@@ -37,7 +37,7 @@ impl Tab {
     fn short(self) -> &'static str {
         match self {
             Tab::Sites => "Sites",
-            Tab::Antenna => "Antenna",
+            Tab::Antenna => "Antennas",
             Tab::Coverage => "Coverage",
             Tab::Links => "Links",
             Tab::Horizon => "Horizon",
@@ -54,7 +54,7 @@ impl Tab {
     }
     pub fn from_name(s: &str) -> Option<Tab> {
         let s = s.to_ascii_lowercase();
-        Tab::ALL.into_iter().find(|t| t.short().to_ascii_lowercase() == s)
+        Tab::ALL.into_iter().find(|t| t.short().to_ascii_lowercase().trim_end_matches('s') == s.trim_end_matches('s'))
     }
 }
 
@@ -70,7 +70,9 @@ struct CacheJob {
 }
 
 struct Job {
-    site_id: String,
+    plot_id: String,
+    /// the plot as it was when the run started
+    def: PlotDef,
     progress: Arc<Progress>,
     rx: Rx<Result<Coverage, String>>,
     started: std::time::Instant,
@@ -95,17 +97,23 @@ pub struct Shot {
 }
 
 pub struct App {
-    sites: Vec<Site>,
-    saved_sites: Vec<Site>,
+    lib: Library,
+    saved: Library,
     settings: Settings,
     saved_settings: Settings,
     last_save: std::time::Instant,
+    /// the site, library antenna and coverage plot being edited
     selected: Option<usize>,
+    sel_ant: Option<usize>,
+    sel_plot: Option<usize>,
     tab: Tab,
     view: View,
     tiles: Tiles,
     terrains: HashMap<u32, Arc<Terrain>>,
-    plots: HashMap<String, Plot>,
+    /// finished coverage, by plot id
+    results: HashMap<String, Plot>,
+    /// map size last frame, to fit a finished plot
+    map_size: Vec2,
     job: Option<Job>,
     status: String,
     error: Option<String>,
@@ -114,6 +122,8 @@ pub struct App {
     loc_text: String,
     popup: Option<Popup>,
     confirm_delete: bool,
+    confirm_delete_ant: bool,
+    confirm_delete_plot: bool,
     /// ground height from the terrain data, by position
     heights: HashMap<(i64, i64), Option<f64>>,
     pending_heights: std::collections::HashSet<(i64, i64)>,
@@ -134,34 +144,39 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, tab: Option<Tab>, shot: Option<PathBuf>) -> Self {
         let settings = model::load_settings();
         crate::theme::install(&cc.egui_ctx, &settings.theme);
-        let sites = model::load_sites();
+        let lib = model::load_library();
+        let sites = &lib.sites;
         let view = match settings.view {
             Some((lat, lon, zoom)) => View { lat, lon, zoom },
             None if !sites.is_empty() => View { lat: sites[0].lat, lon: sites[0].lon, zoom: 9.0 },
             None => View { lat: 54.0, lon: -2.5, zoom: 6.0 },
         };
-        let mut plots = HashMap::new();
-        for s in &sites {
-            if let Some(cov) = Coverage::load(&s.id) {
-                plots.insert(s.id.clone(), Plot { cov, tex: None });
+        let mut results = HashMap::new();
+        for p in &lib.plots {
+            if let Some(cov) = Coverage::load(&p.id) {
+                results.insert(p.id.clone(), Plot { cov, tex: None });
             }
         }
         let (height_tx, height_rx) = channel();
         let (notes_tx, notes_rx) = channel();
         let threads = rayon::current_num_threads();
         let n = sites.len();
+        let (na, np) = (lib.antennas.len(), lib.plots.len());
         App {
-            saved_sites: sites.clone(),
-            sites,
+            saved: lib.clone(),
+            lib,
             saved_settings: settings.clone(),
             settings,
             last_save: std::time::Instant::now(),
             selected: if n > 0 { Some(0) } else { None },
+            sel_ant: if na > 0 { Some(0) } else { None },
+            sel_plot: if np > 0 { Some(0) } else { None },
             tab: tab.unwrap_or(Tab::Sites),
             view,
             tiles: Tiles::new(&cc.egui_ctx),
             terrains: HashMap::new(),
-            plots,
+            results,
+            map_size: Vec2::new(900.0, 700.0),
             job: None,
             status: if n == 0 {
                 "Ready. Press “New site”, or right-click the map where your site is.".into()
@@ -174,6 +189,8 @@ impl App {
             loc_text: String::new(),
             popup: None,
             confirm_delete: false,
+            confirm_delete_ant: false,
+            confirm_delete_plot: false,
             heights: HashMap::new(),
             pending_heights: Default::default(),
             height_rx,
@@ -210,14 +227,20 @@ impl App {
     }
 
     fn unsaved(&self) -> bool {
-        self.sites != self.saved_sites
+        self.lib != self.saved
     }
 
     fn save(&mut self) {
-        match model::save_sites(&self.sites) {
+        match model::save_library(&self.lib) {
             Ok(()) => {
-                self.saved_sites = self.sites.clone();
-                self.status = format!("Saved {} site{}.", self.sites.len(), if self.sites.len() == 1 { "" } else { "s" });
+                self.saved = self.lib.clone();
+                let l = &self.lib;
+                self.status = format!(
+                    "Saved {} · {} · {}.",
+                    plural(l.sites.len(), "site"),
+                    plural(l.antennas.len(), "antenna"),
+                    plural(l.plots.len(), "coverage plot")
+                );
                 self.cache_terrain();
             }
             Err(e) => self.error = Some(e),
@@ -228,7 +251,7 @@ impl App {
     fn cache_terrain(&mut self) {
         let zoom = self.settings.model.terrain_zoom;
         let areas: Vec<(String, f64, f64, f64)> =
-            self.sites.iter().filter(|s| s.cache_terrain).map(|s| (s.name.clone(), s.lat, s.lon, s.cache_radius_km * 1000.0)).collect();
+            self.lib.sites.iter().filter(|s| s.cache_terrain).map(|s| (s.name.clone(), s.lat, s.lon, s.cache_radius_km * 1000.0)).collect();
         if areas.is_empty() {
             return;
         }
@@ -263,9 +286,17 @@ impl App {
     }
 
     fn undo_changes(&mut self) {
-        let id = self.selected.map(|i| self.sites[i].id.clone());
-        self.sites = self.saved_sites.clone();
-        self.selected = id.and_then(|id| self.sites.iter().position(|s| s.id == id)).or(if self.sites.is_empty() { None } else { Some(0) });
+        fn keep<T>(v: &[T], old: Option<String>, id: impl Fn(&T) -> &str) -> Option<usize> {
+            old.and_then(|o| v.iter().position(|x| id(x) == o)).or(if v.is_empty() { None } else { Some(0) })
+        }
+        let site = self.selected.map(|i| self.lib.sites[i].id.clone());
+        let ant = self.sel_ant.map(|i| self.lib.antennas[i].id.clone());
+        let plot = self.sel_plot.map(|i| self.lib.plots[i].id.clone());
+        self.lib = self.saved.clone();
+        self.selected = keep(&self.lib.sites, site, |s| &s.id);
+        self.sel_ant = keep(&self.lib.antennas, ant, |a| &a.id);
+        self.sel_plot = keep(&self.lib.plots, plot, |p| &p.id);
+        self.results.retain(|id, _| self.saved.plots.iter().any(|p| &p.id == id));
         self.picking = false;
         self.status = "Changes undone: back to the last save.".into();
     }
@@ -277,7 +308,7 @@ impl App {
             let save = egui::Button::new(RichText::new("💾 Save").color(if unsaved { Color32::WHITE } else { ui.visuals().weak_text_color() }).strong())
                 .fill(if unsaved { crate::theme::ACCENT } else { ui.visuals().widgets.inactive.weak_bg_fill })
                 .min_size(Vec2::new(90.0, 28.0));
-            if ui.add_enabled(unsaved, save).on_hover_text("Save all sites (Ctrl+S)").clicked() {
+            if ui.add_enabled(unsaved, save).on_hover_text("Save sites, antennas and coverage plots (Ctrl+S)").clicked() {
                 self.save();
             }
             if ui.add_enabled(unsaved, egui::Button::new("↶ Undo changes")).on_hover_text("Go back to the last save").clicked() {
@@ -294,29 +325,47 @@ impl App {
     // ------------------------------------------------------------------ sites
 
     fn new_site(&mut self, lat: f64, lon: f64, pick: bool) {
-        let n = self.sites.len() + 1;
+        let n = self.lib.sites.len() + 1;
         let palette = [[211, 47, 47], [25, 118, 210], [56, 142, 60], [245, 124, 0], [123, 31, 162], [0, 151, 167]];
         let site = Site { id: model::new_id(), name: format!("Site {n}"), lat, lon, colour: palette[(n - 1) % palette.len()], ..Default::default() };
-        self.sites.push(site);
-        self.selected = Some(self.sites.len() - 1);
+        self.lib.sites.push(site);
+        self.selected = Some(self.lib.sites.len() - 1);
         self.tab = Tab::Sites;
         self.picking = pick;
         self.loc_text.clear();
         self.status = if pick { "Click the map where the new site is.".into() } else { "New site added. Drag its pin to adjust it.".into() };
     }
 
+    /// Delete a plot and its coverage, from the saved files too.
+    fn delete_plot(&mut self, id: &str) {
+        self.lib.plots.retain(|p| p.id != id);
+        self.saved.plots.retain(|p| p.id != id);
+        Coverage::delete(id);
+        self.results.remove(id);
+        self.settings.hidden.retain(|h| h != id);
+    }
+
+    fn write_saved(&mut self) {
+        if let Err(e) = model::save_library(&self.saved) {
+            self.error = Some(e);
+        }
+    }
+
     fn delete_selected(&mut self) {
         if let Some(i) = self.selected {
-            let s = self.sites.remove(i);
-            self.saved_sites.retain(|x| x.id != s.id);
-            if let Err(e) = model::save_sites(&self.saved_sites) {
-                self.error = Some(e);
-            }
-            Coverage::delete(&s.id);
-            // the site's cached terrain, apart from what other sites still use
             let general = self.settings.model.radius_km;
-            let removed = vec![(s.lat, s.lon, s.terrain_area_km(general) * 1000.0)];
-            let kept: Vec<(f64, f64, f64)> = self.sites.iter().map(|k| (k.lat, k.lon, k.terrain_area_km(general) * 1000.0)).collect();
+            let s = self.lib.sites[i].clone();
+            let removed = vec![(s.lat, s.lon, self.lib.terrain_area_km(&s, general) * 1000.0)];
+            let ids: Vec<String> = self.lib.plots.iter().filter(|p| p.site_id == s.id).map(|p| p.id.clone()).collect();
+            for id in &ids {
+                self.delete_plot(id);
+            }
+            self.lib.sites.remove(i);
+            self.saved.sites.retain(|x| x.id != s.id);
+            self.write_saved();
+            self.fix_plot_selection();
+            // the site's cached terrain, apart from what other sites still use
+            let kept: Vec<(f64, f64, f64)> = self.lib.sites.iter().map(|k| (k.lat, k.lon, self.lib.terrain_area_km(k, general) * 1000.0)).collect();
             let tx = self.notes_tx.clone();
             let name = s.name.clone();
             std::thread::spawn(move || {
@@ -325,16 +374,65 @@ impl App {
                     let _ = tx.send(format!("Removed {n} cached terrain tile{} that only {name} used.", if n == 1 { "" } else { "s" }));
                 }
             });
-            self.plots.remove(&s.id);
-            self.selected = if self.sites.is_empty() { None } else { Some(i.min(self.sites.len() - 1)) };
-            self.status = format!("Deleted {}.", s.name);
+            self.selected = if self.lib.sites.is_empty() { None } else { Some(i.min(self.lib.sites.len() - 1)) };
+            self.status = if ids.is_empty() { format!("Deleted {}.", s.name) } else { format!("Deleted {} and its {}.", s.name, plural(ids.len(), "coverage plot")) };
         }
+    }
+
+    fn fix_plot_selection(&mut self) {
+        let n = self.lib.plots.len();
+        self.sel_plot = if n == 0 { None } else { Some(self.sel_plot.unwrap_or(0).min(n - 1)) };
+    }
+
+    // ------------------------------------------------------------------ antennas
+
+    fn new_antenna(&mut self, from: Option<usize>) {
+        let a = match from {
+            Some(i) => AntennaDef { id: model::new_id(), name: format!("{} (copy)", self.lib.antennas[i].name), ..self.lib.antennas[i].clone() },
+            None => AntennaDef { id: model::new_id(), ..Default::default() },
+        };
+        self.lib.antennas.push(a);
+        self.sel_ant = Some(self.lib.antennas.len() - 1);
+        self.confirm_delete_ant = false;
+    }
+
+    fn delete_antenna(&mut self, i: usize) {
+        let a = self.lib.antennas.remove(i);
+        self.saved.antennas.retain(|x| x.id != a.id);
+        self.write_saved();
+        let n = self.lib.antennas.len();
+        self.sel_ant = if n == 0 { None } else { Some(i.min(n - 1)) };
+        self.status = format!("Deleted the antenna {}.", a.name);
+    }
+
+    // ------------------------------------------------------------------ plots
+
+    /// A new plot: a copy of plot `from`, else the selected site with the selected antenna.
+    fn new_plot(&mut self, from: Option<usize>) {
+        let p = match from {
+            Some(i) => PlotDef { id: model::new_id(), name: format!("{} (copy)", self.lib.plots[i].name), ..self.lib.plots[i].clone() },
+            None => {
+                let Some(si) = self.selected.or(if self.lib.sites.is_empty() { None } else { Some(0) }) else {
+                    self.status = "Add a site first.".into();
+                    return;
+                };
+                if self.lib.antennas.is_empty() {
+                    self.new_antenna(None);
+                }
+                let a = &self.lib.antennas[self.sel_ant.unwrap_or(0)];
+                let s = &self.lib.sites[si];
+                PlotDef { id: model::new_id(), name: format!("{} · {}", s.name, a.name), site_id: s.id.clone(), antenna_id: a.id.clone(), ..Default::default() }
+            }
+        };
+        self.lib.plots.push(p);
+        self.sel_plot = Some(self.lib.plots.len() - 1);
+        self.confirm_delete_plot = false;
     }
 
     fn set_location(&mut self, lat: f64, lon: f64) {
         if let Some(i) = self.selected {
-            self.sites[i].lat = lat;
-            self.sites[i].lon = lon;
+            self.lib.sites[i].lat = lat;
+            self.lib.sites[i].lon = lon;
         }
     }
 
@@ -361,40 +459,76 @@ impl App {
     // ------------------------------------------------------------------ coverage
 
     fn start_plot(&mut self) {
-        let Some(i) = self.selected else { return };
+        let Some(i) = self.sel_plot else { return };
         if self.job.is_some() {
             return;
         }
-        let site = self.sites[i].clone();
+        let p = self.lib.plots[i].clone();
+        let (Some(site), Some(ant)) = (self.lib.site(&p.site_id).cloned(), self.lib.antenna(&p.antenna_id).cloned()) else {
+            self.status = "Choose a site and an antenna for this plot first.".into();
+            return;
+        };
+        let st = p.station(&ant);
         let mut settings = self.settings.clone();
-        settings.model.radius_km = self.sites[i].plot_radius(self.settings.model.radius_km);
+        settings.model.radius_km = p.radius(&site, self.settings.model.radius_km);
         let terrain = self.terrain(settings.model.terrain_zoom);
         let progress = Progress::new();
         let (tx, rx) = channel();
         let p2 = progress.clone();
         std::thread::spawn(move || {
-            let r = coverage::run(&site, &settings, &terrain, &p2);
+            let r = coverage::run(&site, &st, &settings, &terrain, &p2);
             let _ = tx.send(r);
         });
-        self.status = format!("Plotting coverage for {} on {} threads…", self.sites[i].name, self.threads);
-        self.job = Some(Job { site_id: self.sites[i].id.clone(), progress, rx, started: std::time::Instant::now() });
+        self.status = format!("Plotting {} on {} threads…", p.name, self.threads);
+        self.job = Some(Job { plot_id: p.id.clone(), def: p, progress, rx, started: std::time::Instant::now() });
+    }
+
+    /// Centre the map on a plot and zoom so all of it shows.
+    fn fit_plot(&mut self, lat: f64, lon: f64, radius_km: f64) {
+        let px = (self.map_size.x.min(self.map_size.y) as f64 - 60.0).max(200.0);
+        let mpp = 2.0 * radius_km * 1000.0 / px;
+        let world = 2.0 * std::f64::consts::PI * terrain::EARTH_R * lat.to_radians().cos();
+        self.view.lat = lat;
+        self.view.lon = lon;
+        self.view.zoom = (world / (256.0 * mpp)).log2().clamp(3.0, 16.0);
     }
 
     fn poll(&mut self) {
         let Some(job) = &self.job else { return };
         match job.rx.try_recv() {
             Ok(Ok(cov)) => {
-                let id = job.site_id.clone();
+                let id = job.plot_id.clone();
+                let pd = job.def.clone();
+                if !self.lib.plots.iter().any(|p| p.id == id) {
+                    self.job = None; // deleted while it ran
+                    return;
+                }
                 if let Err(e) = cov.save(&id) {
                     self.error = Some(format!("The plot worked but couldn't be saved: {e}"));
                 }
-                let name = self.sites.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
+                // a plot run counts as saving that plot (and the site and antenna it uses)
+                match self.saved.plots.iter_mut().find(|x| x.id == id) {
+                    Some(x) => *x = pd.clone(),
+                    None => self.saved.plots.push(pd.clone()),
+                }
+                if !self.saved.sites.iter().any(|s| s.id == pd.site_id) {
+                    if let Some(s) = self.lib.site(&pd.site_id).cloned() {
+                        self.saved.sites.push(s);
+                    }
+                }
+                if !self.saved.antennas.iter().any(|a| a.id == pd.antenna_id) {
+                    if let Some(a) = self.lib.antenna(&pd.antenna_id).cloned() {
+                        self.saved.antennas.push(a);
+                    }
+                }
+                self.write_saved();
                 self.status = format!(
-                    "Coverage for {name}: {} radials, {:.0} m steps, done in {:.1} s.",
-                    cov.meta.n_rad, cov.meta.step_m, cov.meta.seconds
+                    "{}: {} radials, {:.0} m steps, done in {:.1} s.",
+                    pd.name, cov.meta.n_rad, cov.meta.step_m, cov.meta.seconds
                 );
+                self.fit_plot(cov.meta.site_lat, cov.meta.site_lon, cov.meta.radius_km);
                 self.settings.hidden.retain(|h| h != &id);
-                self.plots.insert(id, Plot { cov, tex: None });
+                self.results.insert(id, Plot { cov, tex: None });
                 self.job = None;
             }
             Ok(Err(e)) => {
@@ -421,7 +555,7 @@ impl App {
                     self.new_site(self.view.lat, self.view.lon, true);
                     ui.close();
                 }
-                if ui.add_enabled(self.unsaved(), egui::Button::new("Save sites").shortcut_text("Ctrl+S")).clicked() {
+                if ui.add_enabled(self.unsaved(), egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                     self.save();
                     ui.close();
                 }
@@ -468,11 +602,11 @@ impl App {
     }
 
     fn zoom_to_sites(&mut self) {
-        if self.sites.is_empty() {
+        if self.lib.sites.is_empty() {
             return;
         }
         let (mut a, mut b, mut c, mut d) = (90.0f64, -90.0f64, 180.0f64, -180.0f64);
-        for s in &self.sites {
+        for s in &self.lib.sites {
             a = a.min(s.lat);
             b = b.max(s.lat);
             c = c.min(s.lon);
@@ -522,12 +656,12 @@ impl App {
                 }
             });
         });
-        if self.sites.is_empty() {
+        if self.lib.sites.is_empty() {
             ui.label(RichText::new("No sites yet. Press “New site”, or right-click the map where a site is.").weak());
         }
         let mut select = None;
         let mut goto = None;
-        for (i, s) in self.sites.iter().enumerate() {
+        for (i, s) in self.lib.sites.iter().enumerate() {
             let sel = self.selected == Some(i);
             let fill = if sel { ui.visuals().selection.bg_fill } else { ui.visuals().window_fill };
             let r = egui::Frame::new()
@@ -543,16 +677,6 @@ impl App {
                         ui.painter().circle_filled(r.center(), 6.0, Color32::from_rgb(s.colour[0], s.colour[1], s.colour[2]));
                         ui.label(RichText::new(&s.name).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.plots.contains_key(&s.id) {
-                                let mut shown = !self.settings.hidden.contains(&s.id);
-                                if ui.checkbox(&mut shown, "").on_hover_text("Show this site's coverage").changed() {
-                                    if shown {
-                                        self.settings.hidden.retain(|h| h != &s.id);
-                                    } else {
-                                        self.settings.hidden.push(s.id.clone());
-                                    }
-                                }
-                            }
                             ui.label(RichText::new(coords::to_maidenhead(s.lat, s.lon, 6)).monospace().weak());
                         });
                     });
@@ -574,8 +698,8 @@ impl App {
             self.selected = Some(i);
         }
         if let Some(i) = goto {
-            self.view.lat = self.sites[i].lat;
-            self.view.lon = self.sites[i].lon;
+            self.view.lat = self.lib.sites[i].lat;
+            self.view.lon = self.lib.sites[i].lon;
             self.view.zoom = self.view.zoom.max(11.0);
         }
         let Some(i) = self.selected else { return };
@@ -585,10 +709,10 @@ impl App {
         card(ui, "Site", |ui| {
             egui::Grid::new("site_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label("Name");
-                ui.add(egui::TextEdit::singleline(&mut self.sites[i].name).desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut self.lib.sites[i].name).desired_width(f32::INFINITY));
                 ui.end_row();
                 ui.label("Colour");
-                let s = &mut self.sites[i];
+                let s = &mut self.lib.sites[i];
                 ui.color_edit_button_srgb(&mut s.colour);
                 ui.end_row();
             });
@@ -613,13 +737,13 @@ impl App {
                     self.picking = !self.picking;
                 }
                 if ui.button("Centre map here").clicked() {
-                    self.view.lat = self.sites[i].lat;
-                    self.view.lon = self.sites[i].lon;
+                    self.view.lat = self.lib.sites[i].lat;
+                    self.view.lon = self.lib.sites[i].lon;
                     self.view.zoom = self.view.zoom.max(12.0);
                 }
             });
             ui.add_space(4.0);
-            let (lat, lon) = (self.sites[i].lat, self.sites[i].lon);
+            let (lat, lon) = (self.lib.sites[i].lat, self.lib.sites[i].lon);
             let d = coords::describe(lat, lon);
             let h = self.ground_height(lat, lon);
             egui::Grid::new("where").num_columns(2).spacing([10.0, 3.0]).striped(true).show(ui, |ui| {
@@ -642,7 +766,7 @@ impl App {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let s = &mut self.sites[i];
+                let s = &mut self.lib.sites[i];
                 let mut manual = s.ground_m.is_some();
                 if ui.checkbox(&mut manual, "Set ground height myself").changed() {
                     s.ground_m = if manual { Some(h.flatten().unwrap_or(0.0).round()) } else { None };
@@ -652,25 +776,26 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                let s = &mut self.sites[i];
+                let s = &mut self.lib.sites[i];
                 ui.checkbox(&mut s.cache_terrain, "Download terrain when saved").on_hover_text("Keeps the terrain around this site on disk, so plots work offline");
                 if s.cache_terrain {
                     ui.label("out to");
                     ui.add(egui::DragValue::new(&mut s.cache_radius_km).speed(1.0).range(1.0..=250.0).suffix(" km"));
                 }
             });
-            if self.sites[i].cache_terrain {
-                ui.label(RichText::new("This distance is also the radius of this site's coverage plots.").small().weak());
+            if self.lib.sites[i].cache_terrain {
+                ui.label(RichText::new("This distance is also the default radius of coverage plots from this site.").small().weak());
             }
             ui.label("Notes");
-            ui.add(egui::TextEdit::multiline(&mut self.sites[i].notes).desired_rows(2).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut self.lib.sites[i].notes).desired_rows(2).desired_width(f32::INFINITY));
             ui.add_space(6.0);
             ui.separator();
             self.save_bar(ui);
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 if self.confirm_delete {
-                    ui.label(format!("Delete {}?", self.sites[i].name));
+                    let n = self.lib.plots.iter().filter(|p| p.site_id == self.lib.sites[i].id).count();
+                    ui.label(if n == 0 { format!("Delete {}?", self.lib.sites[i].name) } else { format!("Delete {} and its {}?", self.lib.sites[i].name, plural(n, "coverage plot")) });
                     if ui.button(RichText::new("Delete").color(Color32::from_rgb(198, 40, 40))).clicked() {
                         delete = true;
                     }
@@ -702,63 +827,54 @@ impl App {
     }
 
     fn antenna_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Antenna and radio");
-        let Some(i) = self.selected else {
-            ui.label(RichText::new("Choose or add a site first.").weak());
+        ui.horizontal(|ui| {
+            ui.heading("Antennas");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("＋ New antenna").color(Color32::WHITE)).fill(crate::theme::ACCENT)).clicked() {
+                    self.new_antenna(None);
+                }
+            });
+        });
+        ui.label(RichText::new("Your antennas, kept apart from the sites. A coverage plot puts one of them on a site, at a height and bearing you choose there.").small().weak());
+        ui.add_space(4.0);
+        let mut select = None;
+        for (i, a) in self.lib.antennas.iter().enumerate() {
+            let used = self.lib.plots.iter().filter(|p| p.antenna_id == a.id).count();
+            let right = format!("{:.1} dBi{}", a.gain_dbi, if a.directional { " · beam" } else { "" });
+            let sub = if used == 0 { "not used yet".to_string() } else { format!("in {}", plural(used, "plot")) };
+            if list_row(ui, ("ant", i), self.sel_ant == Some(i), None, &a.name, &sub, &right).clicked() {
+                select = Some(i);
+            }
+        }
+        if let Some(i) = select {
+            if self.sel_ant != Some(i) {
+                self.confirm_delete_ant = false;
+            }
+            self.sel_ant = Some(i);
+        }
+        let Some(i) = self.sel_ant else {
+            ui.label(RichText::new("No antennas yet. Press “New antenna”.").weak());
             return;
         };
-        ui.label(RichText::new(&self.sites[i].name).strong());
-        ui.add_space(4.0);
-        let st = &mut self.sites[i].station;
-        card(ui, "Radio", |ui| {
-            egui::Grid::new("radio").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                ui.label("Frequency");
-                ui.add(egui::DragValue::new(&mut st.freq_mhz).speed(0.025).range(20.0..=20000.0).suffix(" MHz").max_decimals(4));
-                ui.end_row();
-                ui.label("Transmit power");
-                ui.add(egui::DragValue::new(&mut st.power_w).speed(0.5).range(0.01..=100000.0).suffix(" W"));
-                ui.end_row();
-                ui.label("Feeder loss");
-                ui.add(egui::DragValue::new(&mut st.feeder_loss_db).speed(0.1).range(0.0..=30.0).suffix(" dB"));
-                ui.end_row();
-                ui.label("Receiver sensitivity");
-                ui.add(egui::DragValue::new(&mut st.rx_sensitivity_dbm).speed(0.5).range(-150.0..=-50.0).suffix(" dBm"));
-                ui.end_row();
-                ui.label("Polarisation");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut st.vertical, true, "Vertical");
-                    ui.radio_value(&mut st.vertical, false, "Horizontal");
-                });
-                ui.end_row();
-            });
-            let eirp = st.eirp_dbm();
-            ui.label(
-                RichText::new(format!(
-                    "TX {:.1} dBm · EIRP {:.1} dBm ({}) · ERP {} · RX {:.2} µV pd",
-                    st.tx_dbm(),
-                    eirp,
-                    watts(eirp),
-                    watts(eirp - 2.15),
-                    dbm_to_uv(st.rx_sensitivity_dbm)
-                ))
-                .small()
-                .weak(),
-            );
-        });
-        let a = &mut st.antenna;
+        ui.add_space(6.0);
+        let mut delete = false;
+        let mut copy = false;
+        let users: Vec<String> = self.lib.plots.iter().filter(|p| p.antenna_id == self.lib.antennas[i].id).map(|p| p.name.clone()).collect();
         card(ui, "Antenna", |ui| {
+            let a = &mut self.lib.antennas[i];
             egui::Grid::new("ant").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
+                ui.end_row();
                 ui.label("Type");
                 egui::ComboBox::from_id_salt("preset").selected_text(model::preset_label(&a.preset)).width(220.0).show_ui(ui, |ui| {
                     for p in PRESETS {
                         if ui.selectable_label(a.preset == p.key, p.label).clicked() {
-                            a.preset = p.key.into();
-                            a.gain_dbi = p.gain;
-                            a.directional = p.directional;
-                            a.v_beamwidth = p.v_bw;
-                            if p.directional {
-                                a.h_beamwidth = p.h_bw;
-                                a.front_back_db = p.fb;
+                            let old_label = model::preset_label(&a.preset);
+                            let renamed = a.name == old_label || a.name.is_empty();
+                            a.apply_preset(p);
+                            if renamed {
+                                a.name = p.label.into();
                             }
                         }
                     }
@@ -771,9 +887,6 @@ impl App {
                 ui.label("Gain");
                 ui.add(egui::DragValue::new(&mut a.gain_dbi).speed(0.1).range(-20.0..=40.0).suffix(" dBi"));
                 ui.end_row();
-                ui.label("Height above ground");
-                ui.add(egui::DragValue::new(&mut a.height_m).speed(0.25).range(0.5..=3000.0).suffix(" m"));
-                ui.end_row();
                 ui.label("Pattern");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut a.directional, false, "Omni");
@@ -781,9 +894,6 @@ impl App {
                 });
                 ui.end_row();
                 if a.directional {
-                    ui.label("Azimuth");
-                    ui.add(egui::DragValue::new(&mut a.azimuth).speed(1.0).range(0.0..=359.9).suffix("° true"));
-                    ui.end_row();
                     ui.label("Horizontal beamwidth");
                     ui.add(egui::DragValue::new(&mut a.h_beamwidth).speed(1.0).range(5.0..=360.0).suffix("°"));
                     ui.end_row();
@@ -794,44 +904,209 @@ impl App {
                 ui.label("Vertical beamwidth");
                 ui.add(egui::DragValue::new(&mut a.v_beamwidth).speed(1.0).range(0.0..=180.0).suffix("°"));
                 ui.end_row();
-                ui.label("Down-tilt");
-                ui.add(egui::DragValue::new(&mut a.tilt).speed(0.25).range(-30.0..=30.0).suffix("°"));
-                ui.end_row();
                 if before != (a.gain_dbi, a.directional, a.v_beamwidth, a.h_beamwidth, a.front_back_db) {
                     a.preset = "custom".into();
                 }
             });
-            ui.label(RichText::new("Vertical beamwidth sets how fast the gain falls away above and below the main lobe (0 ignores it); down-tilt moves the main lobe down.").small().weak());
+            ui.label(RichText::new("Vertical beamwidth sets how fast the gain falls away above and below the main lobe (0 ignores it). Height, bearing and down-tilt belong to each plot.").small().weak());
+            if !users.is_empty() {
+                ui.label(RichText::new(format!("Used by: {}", users.join(", "))).small());
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            self.save_bar(ui);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui.button("⧉ Copy").on_hover_text("A new antenna starting from this one").clicked() {
+                    copy = true;
+                }
+                if self.confirm_delete_ant {
+                    if users.is_empty() {
+                        ui.label(format!("Delete {}?", self.lib.antennas[i].name));
+                        if ui.button(RichText::new("Delete").color(Color32::from_rgb(198, 40, 40))).clicked() {
+                            delete = true;
+                        }
+                    } else {
+                        ui.label(RichText::new(format!("Used by {}: give them another antenna first.", plural(users.len(), "plot"))).color(Color32::from_rgb(217, 119, 6)));
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.confirm_delete_ant = false;
+                    }
+                } else if ui.button("🗑 Delete antenna").clicked() {
+                    self.confirm_delete_ant = true;
+                }
+            });
         });
-        self.save_bar(ui);
+        if copy {
+            self.new_antenna(Some(i));
+        }
+        if delete {
+            self.confirm_delete_ant = false;
+            self.delete_antenna(i);
+        }
     }
 
     fn coverage_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Coverage");
-        let Some(i) = self.selected else {
-            ui.label(RichText::new("Choose or add a site first.").weak());
-            return;
-        };
-        ui.label(RichText::new(&self.sites[i].name).strong());
-        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.heading("Coverage plots");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("＋ New plot").color(Color32::WHITE)).fill(crate::theme::ACCENT)).on_hover_text("The selected site with the selected antenna").clicked() {
+                    self.new_plot(None);
+                }
+            });
+        });
+        if self.lib.plots.is_empty() {
+            ui.label(RichText::new("No plots yet. A plot puts one of your antennas on one of your sites. Press “New plot”.").weak());
+        }
+        let mut select = None;
+        let mut toggle = None;
+        let mut zoom = None;
+        for (i, p) in self.lib.plots.iter().enumerate() {
+            let site = self.lib.site(&p.site_id);
+            let colour = site.map(|s| s.colour);
+            let sub = format!(
+                "{} · {}",
+                site.map_or("no site", |s| s.name.as_str()),
+                self.lib.antenna(&p.antenna_id).map_or("no antenna", |a| a.name.as_str())
+            );
+            let done = self.results.contains_key(&p.id);
+            let mut shown = !self.settings.hidden.contains(&p.id);
+            let sel = self.sel_plot == Some(i);
+            let r = list_row_with(ui, ("plot", i), sel, colour, &p.name, &sub, |ui| {
+                if done {
+                    if ui.checkbox(&mut shown, "").on_hover_text("Show on the map").changed() {
+                        toggle = Some((p.id.clone(), shown));
+                    }
+                } else {
+                    ui.label(RichText::new("not run").small().weak());
+                }
+            });
+            if r.clicked() {
+                select = Some(i);
+            }
+            if r.double_clicked() {
+                zoom = Some(i);
+            }
+        }
+        if let Some((id, shown)) = toggle {
+            if shown {
+                self.settings.hidden.retain(|h| h != &id);
+            } else {
+                self.settings.hidden.push(id);
+            }
+        }
+        if let Some(i) = select {
+            if self.sel_plot != Some(i) {
+                self.confirm_delete_plot = false;
+            }
+            self.sel_plot = Some(i);
+            if let Some(si) = self.lib.sites.iter().position(|s| s.id == self.lib.plots[i].site_id) {
+                self.selected = Some(si);
+            }
+        }
+        if let Some(i) = zoom {
+            if let Some(m) = self.results.get(&self.lib.plots[i].id).map(|r| (r.cov.meta.site_lat, r.cov.meta.site_lon, r.cov.meta.radius_km)) {
+                self.fit_plot(m.0, m.1, m.2);
+            }
+        }
+        let Some(i) = self.sel_plot else { return };
+        ui.add_space(6.0);
         let busy = self.job.is_some();
+        let general = self.settings.model.radius_km;
+        let mut copy = false;
+        let mut delete = false;
         card(ui, "Plot", |ui| {
+            let lib = &mut self.lib;
+            let p = &mut lib.plots[i];
+            egui::Grid::new("plotdef").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.label("Site");
+                let cur = lib.sites.iter().find(|s| s.id == p.site_id).map_or("Choose…".to_string(), |s| s.name.clone());
+                egui::ComboBox::from_id_salt("plot_site").selected_text(cur).width(220.0).show_ui(ui, |ui| {
+                    for s in &lib.sites {
+                        ui.selectable_value(&mut p.site_id, s.id.clone(), &s.name);
+                    }
+                });
+                ui.end_row();
+                ui.label("Antenna");
+                let cur = lib.antennas.iter().find(|a| a.id == p.antenna_id).map_or("Choose…".to_string(), |a| a.name.clone());
+                egui::ComboBox::from_id_salt("plot_ant").selected_text(cur).width(220.0).show_ui(ui, |ui| {
+                    for a in &lib.antennas {
+                        ui.selectable_value(&mut p.antenna_id, a.id.clone(), &a.name);
+                    }
+                });
+                ui.end_row();
+            });
+        });
+        let directional = self.lib.antenna(&self.lib.plots[i].antenna_id).is_some_and(|a| a.directional);
+        let site = self.lib.site(&self.lib.plots[i].site_id).cloned();
+        let ant = self.lib.antenna(&self.lib.plots[i].antenna_id).cloned();
+        card(ui, "Installation and radio", |ui| {
+            let p = &mut self.lib.plots[i];
+            egui::Grid::new("radio").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Antenna height");
+                ui.add(egui::DragValue::new(&mut p.height_m).speed(0.25).range(0.5..=3000.0).suffix(" m above ground"));
+                ui.end_row();
+                if directional {
+                    ui.label("Pointing");
+                    ui.add(egui::DragValue::new(&mut p.azimuth).speed(1.0).range(0.0..=359.9).suffix("° true"));
+                    ui.end_row();
+                }
+                ui.label("Down-tilt");
+                ui.add(egui::DragValue::new(&mut p.tilt).speed(0.25).range(-30.0..=30.0).suffix("°"));
+                ui.end_row();
+                ui.label("Frequency");
+                ui.add(egui::DragValue::new(&mut p.freq_mhz).speed(0.025).range(20.0..=20000.0).suffix(" MHz").max_decimals(4));
+                ui.end_row();
+                ui.label("Transmit power");
+                ui.add(egui::DragValue::new(&mut p.power_w).speed(0.5).range(0.01..=100000.0).suffix(" W"));
+                ui.end_row();
+                ui.label("Feeder loss");
+                ui.add(egui::DragValue::new(&mut p.feeder_loss_db).speed(0.1).range(0.0..=30.0).suffix(" dB"));
+                ui.end_row();
+                ui.label("Receiver sensitivity");
+                ui.add(egui::DragValue::new(&mut p.rx_sensitivity_dbm).speed(0.5).range(-150.0..=-50.0).suffix(" dBm"));
+                ui.end_row();
+                ui.label("Polarisation");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut p.vertical, true, "Vertical");
+                    ui.radio_value(&mut p.vertical, false, "Horizontal");
+                });
+                ui.end_row();
+            });
+            if let Some(a) = &ant {
+                let st = p.station(a);
+                let eirp = st.eirp_dbm();
+                ui.label(
+                    RichText::new(format!(
+                        "TX {:.1} dBm · EIRP {:.1} dBm ({}) · ERP {} · RX {:.2} µV pd",
+                        st.tx_dbm(),
+                        eirp,
+                        watts(eirp),
+                        watts(eirp - 2.15),
+                        dbm_to_uv(st.rx_sensitivity_dbm)
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+        });
+        card(ui, "Run", |ui| {
             let m = &mut self.settings.model;
+            let p = &mut self.lib.plots[i];
             egui::Grid::new("plot").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label("Radius");
                 ui.horizontal(|ui| {
-                    let site = &mut self.sites[i];
-                    let mut r = site.plot_radius(m.radius_km);
+                    let def = site.as_ref().map_or(general, |s| s.default_radius(general));
+                    let mut r = p.radius_km.unwrap_or(def);
                     if ui.add(egui::DragValue::new(&mut r).speed(1.0).range(2.0..=250.0).suffix(" km")).changed() {
-                        if site.cache_terrain || site.plot_radius_km.is_some() {
-                            site.plot_radius_km = Some(r);
-                        } else {
-                            m.radius_km = r;
-                        }
+                        p.radius_km = Some(r);
                     }
-                    if site.cache_terrain && site.plot_radius_km.is_some_and(|p| p != site.cache_radius_km) {
-                        if ui.small_button("↺").on_hover_text(format!("Back to the site's terrain distance ({:.0} km)", site.cache_radius_km)).clicked() {
-                            site.plot_radius_km = None;
+                    if p.radius_km.is_some_and(|x| x != def) {
+                        if ui.small_button("↺").on_hover_text(format!("Back to the site's default ({def:.0} km)")).clicked() {
+                            p.radius_km = None;
                         }
                     }
                 });
@@ -866,14 +1141,50 @@ impl App {
                             .text(format!("{} · {:.0} s", job.progress.stage.get(), job.started.elapsed().as_secs_f32()))
                             .animate(true),
                     );
-                } else if ui.add(egui::Button::new(RichText::new("▶ Plot coverage").color(Color32::WHITE).strong()).fill(crate::theme::ACCENT).min_size(Vec2::new(150.0, 30.0))).clicked() {
+                } else if ui
+                    .add_enabled(site.is_some() && ant.is_some(), egui::Button::new(RichText::new("▶ Plot coverage").color(Color32::WHITE).strong()).fill(crate::theme::ACCENT).min_size(Vec2::new(150.0, 30.0)))
+                    .clicked()
+                {
                     self.start_plot();
                 }
             });
+            ui.add_space(4.0);
+            ui.separator();
+            self.save_bar(ui);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui.button("⧉ Copy").on_hover_text("A new plot starting from this one: try another antenna, or the same one at another site").clicked() {
+                    copy = true;
+                }
+                if self.confirm_delete_plot {
+                    ui.label(format!("Delete {}?", self.lib.plots[i].name));
+                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(198, 40, 40))).clicked() {
+                        delete = true;
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.confirm_delete_plot = false;
+                    }
+                } else if ui.button("🗑 Delete plot").clicked() {
+                    self.confirm_delete_plot = true;
+                }
+            });
         });
+        if copy {
+            self.new_plot(Some(i));
+            return;
+        }
+        if delete {
+            self.confirm_delete_plot = false;
+            let p = self.lib.plots[i].clone();
+            self.delete_plot(&p.id);
+            self.write_saved();
+            self.fix_plot_selection();
+            self.status = format!("Deleted the plot {}.", p.name);
+            return;
+        }
         card(ui, "Receive levels", |ui| {
             ui.label(RichText::new("Each colour shows where that kind of station hears the site at or above the signal it needs. Hand portables are drawn on top.").small().weak());
-            let st = self.sites[i].station.clone();
+            let st = ant.as_ref().map(|a| self.lib.plots[i].station(a)).unwrap_or_default();
             egui::Grid::new("levels").num_columns(6).spacing([6.0, 4.0]).show(ui, |ui| {
                 for h in ["", "Station", "Height", "Gain", "Losses", "Needs"] {
                     ui.label(RichText::new(h).small().weak());
@@ -884,7 +1195,7 @@ impl App {
                     level_row(ui, r, k == 2, &st);
                 }
             });
-            ui.checkbox(&mut self.settings.base.use_site_antenna, "Base station uses this site's antenna height, gain, feeder and receiver");
+            ui.checkbox(&mut self.settings.base.use_site_antenna, "Base station uses this plot's antenna, height, feeder and receiver");
             ui.label(RichText::new("Longley-Rice knows nothing of buildings, trees or a body holding the radio: put allowances for them in Losses. −107 dBm ≈ 1 µV, −113 ≈ 0.5 µV, −119 ≈ 0.25 µV.").small().weak());
         });
         egui::CollapsingHeader::new("Propagation model (Longley-Rice)").show(ui, |ui| {
@@ -920,9 +1231,9 @@ impl App {
             });
             ui.label(RichText::new("50 % / 50 % / 50 % gives the median prediction. Raise them for a more cautious plot.").small().weak());
         });
-        if let Some(p) = self.plots.get(&self.sites[i].id) {
+        if let Some(p) = self.results.get(&self.lib.plots[i].id) {
             let m = &p.cov.meta;
-            card(ui, "Last plot", |ui| {
+            card(ui, "Last run", |ui| {
                 for s in &m.stats {
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
@@ -970,11 +1281,12 @@ impl App {
             self.popup = None;
         }
         let tint = Color32::from_white_alpha((self.settings.opacity * 255.0) as u8);
-        for s in &self.sites {
+        self.map_size = proj.rect.size();
+        for s in &self.lib.plots {
             if !show_cov || self.settings.hidden.contains(&s.id) {
                 continue;
             }
-            let Some(p) = self.plots.get_mut(&s.id) else { continue };
+            let Some(p) = self.results.get_mut(&s.id) else { continue };
             let m = &p.cov.meta;
             let tex = p.tex.get_or_insert_with(|| {
                 let img = egui::ColorImage::from_rgba_unmultiplied([m.img_w as usize, m.img_h as usize], p.cov.image.as_raw());
@@ -986,7 +1298,7 @@ impl App {
 
         // pins
         let mut pin_rects = vec![];
-        for (i, s) in self.sites.iter().enumerate() {
+        for (i, s) in self.lib.sites.iter().enumerate() {
             let tip = proj.to_screen(s.lat, s.lon);
             let sel = self.selected == Some(i);
             let r = map::pin(&painter, tip, Color32::from_rgb(s.colour[0], s.colour[1], s.colour[2]), sel);
@@ -1040,8 +1352,8 @@ impl App {
         }
         self.popup_window(&ctx, &proj);
         let mut legend_levels = None;
-        for s in &self.sites {
-            if let Some(p) = self.plots.get(&s.id) {
+        for s in &self.lib.plots {
+            if let Some(p) = self.results.get(&s.id) {
                 if !self.settings.hidden.contains(&s.id) {
                     legend_levels = Some(p.cov.meta.levels.clone());
                     break;
@@ -1050,7 +1362,7 @@ impl App {
         }
         if !show_cov {
             legend_levels = None;
-            if !self.plots.is_empty() {
+            if !self.results.is_empty() {
                 let painter = ui.painter_at(proj.rect);
                 let g = painter.layout_no_wrap("Coverage is hidden while you edit sites".into(), egui::FontId::proportional(12.0), crate::theme::ink_soft());
                 let r = egui::Rect::from_min_size(proj.rect.right_top() + Vec2::new(-g.size().x - 22.0, 10.0), g.size() + Vec2::new(12.0, 6.0));
@@ -1073,11 +1385,11 @@ impl App {
             return;
         }
         let mut infos = vec![];
-        for s in &self.sites {
+        for s in &self.lib.plots {
             if self.settings.hidden.contains(&s.id) {
                 continue;
             }
-            if let Some(p) = self.plots.get(&s.id) {
+            if let Some(p) = self.results.get(&s.id) {
                 if let Some(q) = p.cov.query(lat, lon) {
                     infos.push((s.name.clone(), q));
                 }
@@ -1224,7 +1536,7 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 if let Some(i) = self.selected {
-                    let s = &self.sites[i];
+                    let s = &self.lib.sites[i];
                     ui.label(RichText::new(format!("{}  {}", s.name, coords::to_maidenhead(s.lat, s.lon, 6))).strong());
                     ui.separator();
                 }
@@ -1308,6 +1620,45 @@ fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
             ui.add_space(2.0);
             body(ui);
         });
+}
+
+fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// One entry of a list (sites, antennas, plots): a dot, a name, a line under it and a note on the right.
+fn list_row(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, sel: bool, colour: Option<[u8; 3]>, title: &str, sub: &str, right: &str) -> egui::Response {
+    list_row_with(ui, id, sel, colour, title, sub, |ui| {
+        ui.label(RichText::new(right).small().weak());
+    })
+}
+
+fn list_row_with(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, sel: bool, colour: Option<[u8; 3]>, title: &str, sub: &str, right: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    let fill = if sel { ui.visuals().selection.bg_fill } else { ui.visuals().window_fill };
+    let r = egui::Frame::new()
+        .fill(fill)
+        .stroke(if sel { egui::Stroke::new(1.0, ui.visuals().selection.stroke.color) } else { ui.visuals().widgets.noninteractive.bg_stroke })
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .outer_margin(egui::Margin { bottom: 4, ..Default::default() })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if let Some(c) = colour {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 6.0, Color32::from_rgb(c[0], c[1], c[2]));
+                }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(RichText::new(title).strong());
+                    if !sub.is_empty() {
+                        ui.label(RichText::new(sub).small().weak());
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
+            });
+        });
+    ui.interact(r.response.rect, ui.make_persistent_id(id), egui::Sense::click())
 }
 
 fn level_row(ui: &mut egui::Ui, r: &mut Receiver, base: bool, st: &model::Station) {

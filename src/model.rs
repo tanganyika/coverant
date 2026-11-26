@@ -1,5 +1,5 @@
-//! Sites, their radio and antenna, the receive levels and the propagation settings,
-//! and where they are kept between runs:
+//! Sites, the antenna library, coverage plots (a site with an antenna and a radio),
+//! the receive levels and the propagation settings, and where they are kept between runs:
 //! ~/.local/share/radio-sites, %APPDATA%\radio-sites or
 //! ~/Library/Application Support/radio-sites (`RADIOSITES_DATA_DIR` overrides it).
 
@@ -75,12 +75,15 @@ pub struct Site {
     pub ground_m: Option<f64>,
     pub notes: String,
     pub colour: [u8; 3],
-    pub station: Station,
+    /// the radio and antenna of older versions, read once to make the first plots
+    #[serde(skip_serializing)]
+    pub station: Option<Station>,
     /// download the terrain around the site when it is saved
     pub cache_terrain: bool,
     /// how far out (km); also the default radius of this site's coverage plots
     pub cache_radius_km: f64,
-    /// a coverage radius chosen on the Coverage tab, instead of the default
+    /// older versions' radius chosen on the Coverage tab (now on each plot)
+    #[serde(skip_serializing)]
     pub plot_radius_km: Option<f64>,
 }
 
@@ -94,7 +97,7 @@ impl Default for Site {
             ground_m: None,
             notes: String::new(),
             colour: [211, 47, 47],
-            station: Station::default(),
+            station: None,
             cache_terrain: true,
             cache_radius_km: 40.0,
             plot_radius_km: None,
@@ -103,16 +106,205 @@ impl Default for Site {
 }
 
 impl Site {
-    /// Radius for this site's coverage plots: one chosen on the Coverage tab, else the terrain
-    /// download distance, else the general default.
-    pub fn plot_radius(&self, general_km: f64) -> f64 {
-        self.plot_radius_km.unwrap_or(if self.cache_terrain { self.cache_radius_km } else { general_km })
+    /// Default radius for coverage plots from this site: the terrain download distance,
+    /// else the general default.
+    pub fn default_radius(&self, general_km: f64) -> f64 {
+        if self.cache_terrain { self.cache_radius_km } else { general_km }
+    }
+}
+
+/// An antenna in the library, independent of any site until a plot uses it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AntennaDef {
+    pub id: String,
+    pub name: String,
+    pub preset: String,
+    pub gain_dbi: f64,
+    pub directional: bool,
+    pub h_beamwidth: f64,
+    pub front_back_db: f64,
+    /// 0 = ignore the vertical pattern
+    pub v_beamwidth: f64,
+}
+
+impl Default for AntennaDef {
+    fn default() -> Self {
+        let a = Antenna::default();
+        AntennaDef {
+            id: String::new(),
+            name: preset_label(&a.preset).into(),
+            preset: a.preset,
+            gain_dbi: a.gain_dbi,
+            directional: a.directional,
+            h_beamwidth: a.h_beamwidth,
+            front_back_db: a.front_back_db,
+            v_beamwidth: a.v_beamwidth,
+        }
+    }
+}
+
+impl AntennaDef {
+    pub fn apply_preset(&mut self, p: &Preset) {
+        self.preset = p.key.into();
+        self.gain_dbi = p.gain;
+        self.directional = p.directional;
+        self.v_beamwidth = p.v_bw;
+        if p.directional {
+            self.h_beamwidth = p.h_bw;
+            self.front_back_db = p.fb;
+        }
+    }
+    fn same_as(&self, o: &AntennaDef) -> bool {
+        (self.preset.as_str(), self.gain_dbi, self.directional, self.h_beamwidth, self.front_back_db, self.v_beamwidth)
+            == (o.preset.as_str(), o.gain_dbi, o.directional, o.h_beamwidth, o.front_back_db, o.v_beamwidth)
+    }
+}
+
+/// A coverage plot: one site, one library antenna, and how it is installed and driven there.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PlotDef {
+    pub id: String,
+    pub name: String,
+    pub site_id: String,
+    pub antenna_id: String,
+    pub height_m: f64,
+    pub azimuth: f64,
+    /// degrees, positive = down
+    pub tilt: f64,
+    pub freq_mhz: f64,
+    pub power_w: f64,
+    pub feeder_loss_db: f64,
+    pub rx_sensitivity_dbm: f64,
+    pub vertical: bool,
+    /// None = the site's default radius
+    pub radius_km: Option<f64>,
+}
+
+impl Default for PlotDef {
+    fn default() -> Self {
+        let st = Station::default();
+        PlotDef {
+            id: String::new(),
+            name: String::new(),
+            site_id: String::new(),
+            antenna_id: String::new(),
+            height_m: st.antenna.height_m,
+            azimuth: 0.0,
+            tilt: 0.0,
+            freq_mhz: st.freq_mhz,
+            power_w: st.power_w,
+            feeder_loss_db: st.feeder_loss_db,
+            rx_sensitivity_dbm: st.rx_sensitivity_dbm,
+            vertical: true,
+            radius_km: None,
+        }
+    }
+}
+
+impl PlotDef {
+    /// The radio and antenna as the coverage engine wants them.
+    pub fn station(&self, a: &AntennaDef) -> Station {
+        Station {
+            freq_mhz: self.freq_mhz,
+            power_w: self.power_w,
+            feeder_loss_db: self.feeder_loss_db,
+            rx_sensitivity_dbm: self.rx_sensitivity_dbm,
+            vertical: self.vertical,
+            antenna: Antenna {
+                preset: a.preset.clone(),
+                gain_dbi: a.gain_dbi,
+                height_m: self.height_m,
+                directional: a.directional,
+                azimuth: self.azimuth,
+                h_beamwidth: a.h_beamwidth,
+                front_back_db: a.front_back_db,
+                tilt: self.tilt,
+                v_beamwidth: a.v_beamwidth,
+            },
+        }
+    }
+    pub fn radius(&self, site: &Site, general_km: f64) -> f64 {
+        self.radius_km.unwrap_or(site.default_radius(general_km))
+    }
+}
+
+/// Everything the user edits and saves.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Library {
+    pub sites: Vec<Site>,
+    pub antennas: Vec<AntennaDef>,
+    pub plots: Vec<PlotDef>,
+}
+
+impl Library {
+    pub fn site(&self, id: &str) -> Option<&Site> {
+        self.sites.iter().find(|s| s.id == id)
+    }
+    pub fn antenna(&self, id: &str) -> Option<&AntennaDef> {
+        self.antennas.iter().find(|a| a.id == id)
+    }
+    /// The area whose terrain belongs to a site: what it downloads and what its plots cover.
+    pub fn terrain_area_km(&self, s: &Site, general_km: f64) -> f64 {
+        let c = if s.cache_terrain { s.cache_radius_km } else { 0.0 };
+        self.plots.iter().filter(|p| p.site_id == s.id).map(|p| p.radius(s, general_km)).fold(c, f64::max)
     }
 
-    /// The area whose terrain belongs to this site: what it downloads and what it plots.
-    pub fn terrain_area_km(&self, general_km: f64) -> f64 {
-        let c = if self.cache_terrain { self.cache_radius_km } else { 0.0 };
-        c.max(self.plot_radius(general_km))
+    /// Turn the per-site radio and antenna of older versions into library antennas and plots
+    /// (a plot keeps its site's id, so its saved coverage still belongs to it). True if anything changed.
+    pub fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        for i in 0..self.sites.len() {
+            let Some(st) = self.sites[i].station.take() else { continue };
+            changed = true;
+            let site = &self.sites[i];
+            let a = &st.antenna;
+            let mut def = AntennaDef {
+                id: new_id(),
+                name: preset_label(&a.preset).into(),
+                preset: a.preset.clone(),
+                gain_dbi: a.gain_dbi,
+                directional: a.directional,
+                h_beamwidth: a.h_beamwidth,
+                front_back_db: a.front_back_db,
+                v_beamwidth: a.v_beamwidth,
+            };
+            if def.preset == "custom" || !PRESETS.iter().any(|p| p.key == def.preset) {
+                def.name = format!("{} antenna", site.name);
+            }
+            let antenna_id = match self.antennas.iter().find(|x| x.same_as(&def)) {
+                Some(x) => x.id.clone(),
+                None => {
+                    let id = def.id.clone();
+                    self.antennas.push(def);
+                    id
+                }
+            };
+            if !self.plots.iter().any(|p| p.id == site.id) {
+                self.plots.push(PlotDef {
+                    id: site.id.clone(),
+                    name: site.name.clone(),
+                    site_id: site.id.clone(),
+                    antenna_id,
+                    height_m: a.height_m,
+                    azimuth: a.azimuth,
+                    tilt: a.tilt,
+                    freq_mhz: st.freq_mhz,
+                    power_w: st.power_w,
+                    feeder_loss_db: st.feeder_loss_db,
+                    rx_sensitivity_dbm: st.rx_sensitivity_dbm,
+                    vertical: st.vertical,
+                    radius_km: site.plot_radius_km,
+                });
+            }
+            self.sites[i].plot_radius_km = None;
+        }
+        if self.antennas.is_empty() {
+            self.antennas.push(AntennaDef { id: new_id(), ..Default::default() });
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -158,7 +350,7 @@ pub struct Receiver {
     pub loss_db: f64,
     pub required_dbm: f64,
     pub colour: [u8; 3],
-    /// base level only: take height, gain, feeder and sensitivity from the site
+    /// base level only: take height, gain, feeder and sensitivity from the plot
     pub use_site_antenna: bool,
 }
 
@@ -266,12 +458,57 @@ fn write<T: Serialize>(name: &str, v: &T) -> Result<(), String> {
 pub fn load_sites() -> Vec<Site> {
     read("sites.json")
 }
-pub fn save_sites(s: &[Site]) -> Result<(), String> {
-    write("sites.json", &s)
-}
 pub fn load_settings() -> Settings {
     read("settings.json")
 }
 pub fn save_settings(s: &Settings) -> Result<(), String> {
     write("settings.json", s)
+}
+
+/// Sites, antennas and plots, with older files brought up to date (and saved again if they were).
+pub fn load_library() -> Library {
+    let mut lib = Library { sites: load_sites(), antennas: read("antennas.json"), plots: read("plots.json") };
+    if lib.sites.iter().any(|s| s.station.is_some()) {
+        let d = data_dir();
+        let _ = std::fs::copy(d.join("sites.json"), d.join("sites-before-antenna-library.json"));
+    }
+    if lib.migrate() {
+        let _ = save_library(&lib);
+    }
+    lib
+}
+pub fn save_library(l: &Library) -> Result<(), String> {
+    write("antennas.json", &l.antennas)?;
+    write("plots.json", &l.plots)?;
+    write("sites.json", &l.sites)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_sites_become_antennas_and_plots() {
+        let old = r#"[{"id":"a1","name":"Hill","lat":52.0,"lon":0.1,"plot_radius_km":30.0,
+            "station":{"freq_mhz":433.5,"power_w":10.0,"antenna":{"preset":"yagi_6","gain_dbi":11.0,"height_m":15.0,"directional":true,"azimuth":90.0}}},
+            {"id":"b2","name":"Tower","lat":52.1,"lon":0.2,"station":{"antenna":{"preset":"yagi_6","gain_dbi":11.0,"height_m":20.0,"directional":true}}}]"#;
+        let mut lib = Library { sites: serde_json::from_str(old).unwrap(), ..Default::default() };
+        assert!(lib.migrate());
+        assert_eq!(lib.plots.len(), 2);
+        assert_eq!(lib.plots[0].id, "a1");
+        assert_eq!(lib.plots[0].freq_mhz, 433.5);
+        assert_eq!(lib.plots[0].azimuth, 90.0);
+        assert_eq!(lib.plots[0].radius_km, Some(30.0));
+        assert_eq!(lib.plots[1].height_m, 20.0);
+        // the same antenna at both sites is one library entry
+        assert_eq!(lib.antennas.len(), 1);
+        assert_eq!(lib.plots[0].antenna_id, lib.plots[1].antenna_id);
+        let st = lib.plots[0].station(&lib.antennas[0]);
+        assert_eq!(st.antenna.gain_dbi, 11.0);
+        assert_eq!(st.antenna.height_m, 15.0);
+        // sites are written without the old fields
+        let j = serde_json::to_string(&lib.sites).unwrap();
+        assert!(!j.contains("station") && !j.contains("plot_radius_km"));
+        assert!(!lib.migrate());
+    }
 }

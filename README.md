@@ -12,19 +12,26 @@ processor core.
   (`TL 450 585`, `TL4500058500`, or eastings,northings). Then click the map or drag the pin
   to put it exactly in place. Right-click the map to start a new site there. Every way of
   writing the position is shown, with the ground height from the terrain data.
-- **Antenna and radio for each site.** Frequency, transmit power, feeder loss, receiver
-  sensitivity and polarisation. Antenna gain, height above ground, omni or directional
-  (azimuth, horizontal beamwidth, front/back ratio), vertical beamwidth and down-tilt.
-  Presets fill in typical ground planes, dipoles, collinears, Yagis and panels.
-- **Coverage plots** over real terrain with the Longley-Rice Irregular Terrain Model
+  Each site can download the terrain around it when saved, out to a distance you choose,
+  which is also the default radius of its plots. Deleting a site removes the terrain only
+  it used.
+- **An antenna library, apart from the sites.** Gain, omni or directional (horizontal
+  beamwidth, front/back ratio) and vertical beamwidth. Presets fill in typical ground planes,
+  dipoles, collinears, Yagis and panels.
+- **Coverage plots as saved items.** Each plot puts one library antenna on one site, with its
+  height, pointing and down-tilt there, and the radio: frequency, power, feeder loss,
+  receiver sensitivity and polarisation. Copy a plot to try another antenna at the same site,
+  or the same antenna at another site; show or hide each one on the map. When a run
+  finishes the map zooms to fit it.
+- **Coverage** over real terrain with the Longley-Rice Irregular Terrain Model
   (ITM 1.2.2, the model Radio Mobile and SPLAT! use), laid over the map in three colours:
   - **blue**: hand portables hear the site;
   - **magenta**: mobiles hear the site;
-  - **green**: a base station with an antenna like the site's own hears it.
+  - **green**: a base station with an antenna like the plot's own hears it.
 
   Click the map for the predicted signal (dBm and µV), path loss, margin and propagation
   mode for each kind of station.
-- **Saving.** Changes to sites and their antennas are kept until you press **Save** (or Ctrl+S); **Undo changes** goes back to the last save, and quitting with unsaved changes asks first. Receive levels and model settings are remembered automatically.
+- **Saving.** Changes to sites, antennas and plots are kept until you press **Save** (or Ctrl+S); **Undo changes** goes back to the last save, and quitting with unsaved changes asks first. Receive levels and model settings are remembered automatically.
 - **Maps:** OpenStreetMap, OpenTopoMap or Esri satellite imagery, optionally in grey so the
   coverage stands out. Light and dark themes (View menu).
 

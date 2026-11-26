@@ -3,7 +3,7 @@
 //! receiving station, then a Web-Mercator image for the map.
 
 use crate::itm::{self, ItmParams, Mode};
-use crate::model::{Receiver, Settings, Site};
+use crate::model::{Antenna, Receiver, Settings, Site, Station};
 use crate::terrain::{EARTH_R, Terrain, destination, distance_bearing, lonlat_to_px, metres_per_px, px_to_lonlat};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 const K_FACTOR: f64 = 4.0 / 3.0;
 
-/// A receive level resolved to numbers (the base level may copy the site's antenna).
+/// A receive level resolved to numbers (the base level may copy the plot's antenna).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Level {
     pub name: String,
@@ -23,7 +23,7 @@ pub struct Level {
     pub colour: [u8; 3],
 }
 
-pub fn levels(site: &Site, s: &Settings) -> Vec<Level> {
+pub fn levels(st: &Station, s: &Settings) -> Vec<Level> {
     let mut out = vec![];
     for (i, r) in s.levels().into_iter().enumerate() {
         if !r.enabled {
@@ -32,7 +32,6 @@ pub fn levels(site: &Site, s: &Settings) -> Vec<Level> {
         let Receiver { name, height_m, gain_dbi, loss_db, required_dbm, colour, .. } = r.clone();
         let mut l = Level { name, height_m, gain_dbi, loss_db, required_dbm, colour };
         if i == 2 && r.use_site_antenna {
-            let st = &site.station;
             l.height_m = st.antenna.height_m;
             l.gain_dbi = st.antenna.gain_dbi;
             l.loss_db = st.feeder_loss_db;
@@ -43,11 +42,10 @@ pub fn levels(site: &Site, s: &Settings) -> Vec<Level> {
     out
 }
 
-/// Loss of the site's antenna (dB, ≥ 0) away from its peak, by azimuth from
+/// Loss of the antenna (dB, ≥ 0) away from its peak, by azimuth from
 /// boresight and elevation angle: 12·(angle/beamwidth)² dB, limited by the
 /// front/back ratio and a 20 dB side-lobe floor.
-pub fn pattern_loss(site: &Site, rel_az: f64, elev: f64) -> f64 {
-    let a = &site.station.antenna;
+pub fn pattern_loss(a: &Antenna, rel_az: f64, elev: f64) -> f64 {
     let av = if a.v_beamwidth > 0.0 { (12.0 * ((elev + a.tilt) / a.v_beamwidth).powi(2)).min(20.0) } else { 0.0 };
     if a.directional {
         let rel = (rel_az + 180.0).rem_euclid(360.0) - 180.0;
@@ -131,15 +129,15 @@ impl Progress {
     }
 }
 
-pub fn run(site: &Site, settings: &Settings, terrain: &Terrain, prog: &Progress) -> Result<Coverage, String> {
+/// Coverage of `st` (radio and antenna) installed at `site`, out to `settings.model.radius_km`.
+pub fn run(site: &Site, st: &Station, settings: &Settings, terrain: &Terrain, prog: &Progress) -> Result<Coverage, String> {
     let t0 = std::time::Instant::now();
     let m = &settings.model;
     let (lat0, lon0) = (site.lat, site.lon);
     let radius = m.radius_km.clamp(1.0, 300.0) * 1000.0;
-    let st = &site.station;
     let h_tx = st.antenna.height_m.max(0.5);
     let eirp = st.eirp_dbm();
-    let levels = levels(site, settings);
+    let levels = levels(st, settings);
     if levels.is_empty() {
         return Err("No receive levels are switched on".into());
     }
@@ -215,7 +213,7 @@ pub fn run(site: &Site, settings: &Settings, terrain: &Terrain, prog: &Progress)
                         mode[k] = md as i8;
                     }
                     let elev = (((zr[k] + h_rx) - (site_ground + h_tx)).atan2(d) - d / (2.0 * ae)).to_degrees();
-                    let s = eirp - pattern_loss(site, rel, elev) - l + lv.gain_dbi - lv.loss_db;
+                    let s = eirp - pattern_loss(&st.antenna, rel, elev) - l + lv.gain_dbi - lv.loss_db;
                     sig[li * npts + k] = s as f32;
                     los[li * npts + k] = l as f32;
                 }
