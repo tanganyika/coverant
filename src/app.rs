@@ -113,6 +113,8 @@ pub struct App {
     height_rx: Rx<((i64, i64), Option<f64>)>,
     height_tx: std::sync::mpsc::Sender<((i64, i64), Option<f64>)>,
     show_about: bool,
+    ask_quit: bool,
+    quit_anyway: bool,
     frame: u64,
     threads: usize,
     shot: Option<Shot>,
@@ -166,6 +168,8 @@ impl App {
             height_rx,
             height_tx,
             show_about: false,
+            ask_quit: false,
+            quit_anyway: false,
             frame: 0,
             threads,
             shot: shot.map(|path| Shot { path, requested: false, done: Arc::new(AtomicBool::new(false)) }),
@@ -182,13 +186,6 @@ impl App {
         if self.last_save.elapsed().as_secs_f32() < 0.8 {
             return;
         }
-        if self.sites != self.saved_sites {
-            match model::save_sites(&self.sites) {
-                Ok(()) => self.saved_sites = self.sites.clone(),
-                Err(e) => self.error = Some(e),
-            }
-            self.last_save = std::time::Instant::now();
-        }
         self.settings.view = Some((self.view.lat, self.view.lon, (self.view.zoom * 10.0).round() / 10.0));
         if self.settings != self.saved_settings {
             if model::save_settings(&self.settings).is_ok() {
@@ -196,6 +193,49 @@ impl App {
             }
             self.last_save = std::time::Instant::now();
         }
+    }
+
+    fn unsaved(&self) -> bool {
+        self.sites != self.saved_sites
+    }
+
+    fn save(&mut self) {
+        match model::save_sites(&self.sites) {
+            Ok(()) => {
+                self.saved_sites = self.sites.clone();
+                self.status = format!("Saved {} site{}.", self.sites.len(), if self.sites.len() == 1 { "" } else { "s" });
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn undo_changes(&mut self) {
+        let id = self.selected.map(|i| self.sites[i].id.clone());
+        self.sites = self.saved_sites.clone();
+        self.selected = id.and_then(|id| self.sites.iter().position(|s| s.id == id)).or(if self.sites.is_empty() { None } else { Some(0) });
+        self.picking = false;
+        self.status = "Changes undone: back to the last save.".into();
+    }
+
+    /// Save and Undo buttons, and whether anything is waiting to be saved.
+    fn save_bar(&mut self, ui: &mut egui::Ui) {
+        let unsaved = self.unsaved();
+        ui.horizontal(|ui| {
+            let save = egui::Button::new(RichText::new("💾 Save").color(if unsaved { Color32::WHITE } else { ui.visuals().weak_text_color() }).strong())
+                .fill(if unsaved { crate::theme::ACCENT } else { ui.visuals().widgets.inactive.weak_bg_fill })
+                .min_size(Vec2::new(90.0, 28.0));
+            if ui.add_enabled(unsaved, save).on_hover_text("Save all sites (Ctrl+S)").clicked() {
+                self.save();
+            }
+            if ui.add_enabled(unsaved, egui::Button::new("↶ Undo changes")).on_hover_text("Go back to the last save").clicked() {
+                self.undo_changes();
+            }
+            if unsaved {
+                ui.label(RichText::new("● Unsaved changes").color(Color32::from_rgb(217, 119, 6)));
+            } else {
+                ui.label(RichText::new("✔ All saved").weak());
+            }
+        });
     }
 
     // ------------------------------------------------------------------ sites
@@ -215,6 +255,10 @@ impl App {
     fn delete_selected(&mut self) {
         if let Some(i) = self.selected {
             let s = self.sites.remove(i);
+            self.saved_sites.retain(|x| x.id != s.id);
+            if let Err(e) = model::save_sites(&self.saved_sites) {
+                self.error = Some(e);
+            }
             Coverage::delete(&s.id);
             self.plots.remove(&s.id);
             self.selected = if self.sites.is_empty() { None } else { Some(i.min(self.sites.len() - 1)) };
@@ -309,6 +353,10 @@ impl App {
             ui.menu_button("File", |ui| {
                 if ui.button("New site").clicked() {
                     self.new_site(self.view.lat, self.view.lon, true);
+                    ui.close();
+                }
+                if ui.add_enabled(self.unsaved(), egui::Button::new("Save sites").shortcut_text("Ctrl+S")).clicked() {
+                    self.save();
                     ui.close();
                 }
                 ui.separator();
@@ -540,6 +588,9 @@ impl App {
             ui.label("Notes");
             ui.add(egui::TextEdit::multiline(&mut self.sites[i].notes).desired_rows(2).desired_width(f32::INFINITY));
             ui.add_space(6.0);
+            ui.separator();
+            self.save_bar(ui);
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
                 if self.confirm_delete {
                     ui.label(format!("Delete {}?", self.sites[i].name));
@@ -675,6 +726,7 @@ impl App {
             });
             ui.label(RichText::new("Vertical beamwidth sets how fast the gain falls away above and below the main lobe (0 ignores it); down-tilt moves the main lobe down.").small().weak());
         });
+        self.save_bar(ui);
     }
 
     fn coverage_tab(&mut self, ui: &mut egui::Ui) {
@@ -1030,6 +1082,13 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
         self.screenshot(&ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && self.unsaved() {
+            self.save();
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.unsaved() && !self.quit_anyway {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_quit = true;
+        }
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         if narrow(&ctx) {
             self.nav(ui);
@@ -1041,6 +1100,10 @@ impl eframe::App for App {
                 if let Some(i) = self.selected {
                     let s = &self.sites[i];
                     ui.label(RichText::new(format!("{}  {}", s.name, coords::to_maidenhead(s.lat, s.lon, 6))).strong());
+                    ui.separator();
+                }
+                if self.unsaved() {
+                    ui.label(RichText::new("● Unsaved").color(Color32::from_rgb(217, 119, 6))).on_hover_text("Press Save (Ctrl+S) to keep your changes");
                     ui.separator();
                 }
                 ui.add(egui::Label::new(&self.status).truncate());
@@ -1063,6 +1126,30 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.map_panel(ui));
         self.about(&ctx);
+        if self.ask_quit {
+            egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(&ctx, |ui| {
+                ui.label("Your sites have changes that haven't been saved.");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Save and quit").color(Color32::WHITE)).fill(crate::theme::ACCENT)).clicked() {
+                        self.save();
+                        if !self.unsaved() {
+                            self.quit_anyway = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        self.ask_quit = false;
+                    }
+                    if ui.button("Quit without saving").clicked() {
+                        self.quit_anyway = true;
+                        self.ask_quit = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.ask_quit = false;
+                    }
+                });
+            });
+        }
         if let Some(e) = self.error.clone() {
             let mut open = true;
             egui::Window::new("Problem").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(&ctx, |ui| {

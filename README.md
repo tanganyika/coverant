@@ -24,6 +24,7 @@ processor core.
 
   Click the map for the predicted signal (dBm and µV), path loss, margin and propagation
   mode for each kind of station.
+- **Saving.** Changes to sites and their antennas are kept until you press **Save** (or Ctrl+S); **Undo changes** goes back to the last save, and quitting with unsaved changes asks first. Receive levels and model settings are remembered automatically.
 - **Maps:** OpenStreetMap, OpenTopoMap or Esri satellite imagery, optionally in grey so the
   coverage stands out. Light and dark themes (View menu).
 
