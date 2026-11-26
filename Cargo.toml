@@ -1,0 +1,25 @@
+[package]
+name = "radio-sites"
+version = "0.1.0"
+edition = "2024"
+description = "Radio coverage planner: sites, antennas and Longley-Rice coverage maps"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+dirs = "6"
+eframe = { version = "0.37.0", features = ["glow"] }
+egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+num-complex = "0.4.6"
+rayon = "1.12.0"
+regex = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+
+[profile.dev]
+opt-level = 2
+debug = false
+
+[profile.release]
+opt-level = 3

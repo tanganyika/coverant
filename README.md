@@ -1,0 +1,94 @@
+# Radio Sites
+
+A coverage planner for radio sites, in the spirit of VE2DBE's Radio Mobile, for Linux,
+Windows and macOS. It is written in Rust with egui, with the same look as
+[wireant](https://github.com/tanganyika/wireant), and the heavy calculations run on every
+processor core.
+
+## What it does (phase 1)
+
+- **Sites.** Type a location as decimal lat/long, degrees-minutes-seconds, degrees and
+  decimal minutes, a Maidenhead locator (4 to 10 characters) or an OS grid reference
+  (`TL 450 585`, `TL4500058500`, or eastings,northings). Then click the map or drag the pin
+  to put it exactly in place. Right-click the map to start a new site there. Every way of
+  writing the position is shown, with the ground height from the terrain data.
+- **Antenna and radio for each site.** Frequency, transmit power, feeder loss, receiver
+  sensitivity and polarisation. Antenna gain, height above ground, omni or directional
+  (azimuth, horizontal beamwidth, front/back ratio), vertical beamwidth and down-tilt.
+  Presets fill in typical ground planes, dipoles, collinears, Yagis and panels.
+- **Coverage plots** over real terrain with the Longley-Rice Irregular Terrain Model
+  (ITM 1.2.2, the model Radio Mobile and SPLAT! use), laid over the map in three colours:
+  - **blue**: hand portables hear the site;
+  - **magenta**: mobiles hear the site;
+  - **green**: a base station with an antenna like the site's own hears it.
+
+  Click the map for the predicted signal (dBm and µV), path loss, margin and propagation
+  mode for each kind of station.
+- **Maps:** OpenStreetMap, OpenTopoMap or Esri satellite imagery, optionally in grey so the
+  coverage stands out. Light and dark themes (View menu).
+
+**Coming next:** path profiles and link quality between two or more sites, and the radio
+horizon from a site (the *Links* and *Horizon* tabs).
+
+## Building and running
+
+Install Rust from <https://rustup.rs>, then in this folder:
+
+```
+cargo run --release
+```
+
+The first build takes a few minutes. The program is then
+`target/release/radio-sites` (`radio-sites.exe` on Windows), which can be copied anywhere.
+On Linux, egui needs the usual X11/Wayland libraries (on Debian/Ubuntu:
+`sudo apt install libxkbcommon-x11-0 libgl1`).
+
+Pushing to GitHub builds Windows, macOS and Linux programs with GitHub Actions
+(`.github/workflows/build.yml`); a `v*` tag makes a release with them.
+
+## Getting sensible results
+
+Longley-Rice predicts the median signal over the terrain. It does not know about
+buildings, trees or a body holding the radio, so the receive-level table has a **Losses**
+column for those allowances (the hand portable starts with 6 dB). **Needs** is the signal
+that kind of station needs: −107 dBm ≈ 1 µV, −113 dBm ≈ 0.5 µV, −119 dBm ≈ 0.25 µV
+(into 50 Ω).
+
+Under *Propagation model* set the climate (UK: "Maritime temperate, over land"), ground,
+surface refractivity, and time / location / situation percentages; raise those above 50 %
+for a more cautious plot.
+
+## Data
+
+Terrain comes from the free AWS Terrain Tiles (SRTM, EU-DEM and national datasets; no sign-up).
+Terrain and map tiles are downloaded as needed and cached, so areas you have looked at work
+offline.
+
+| What | Where |
+|---|---|
+| Sites, settings, plots | `~/.local/share/radio-sites`, `%APPDATA%\radio-sites`, `~/Library/Application Support/radio-sites` |
+| Terrain and map tiles | `~/.cache/radio-sites`, `%LOCALAPPDATA%\radio-sites`, `~/Library/Caches/radio-sites` |
+
+`RADIOSITES_DATA_DIR` and `RADIOSITES_CACHE_DIR` move them. File → Open data folder opens
+the first. Set `RADIOSITES_RENDERER=glow` to use plain OpenGL if the default renderer won't
+start (it falls back on its own too).
+
+## Code
+
+```
+src/itm.rs       Longley-Rice ITM 1.2.2, point to point
+src/terrain.rs   terrain tiles, sampling, Web Mercator and great-circle helpers
+src/coverage.rs  radial coverage calculation, the map image, point queries
+src/coords.rs    lat/long, DMS, Maidenhead and OS grid conversions
+src/map.rs       the map widget: tiles, pan and zoom, pins
+src/model.rs     sites, stations, receive levels, settings, saving
+src/app.rs       the window: tab rail, panels, map
+src/theme.rs     fonts, colours and widget style (shared with wireant)
+```
+
+`cargo test --release` checks the ITM code against 40 reference paths and the coordinate
+conversions against known points.
+
+Elevation data: Terrain Tiles (Mapzen / Tilezen, on the AWS Registry of Open Data). Maps ©
+OpenStreetMap contributors, OpenTopoMap (CC-BY-SA), Esri. Fonts: Inter and JetBrains Mono
+(SIL Open Font License).
