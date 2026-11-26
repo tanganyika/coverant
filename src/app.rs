@@ -5,7 +5,7 @@ use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
 use crate::itm::CLIMATES;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
-use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS};
+use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS, SURROUNDINGS};
 use crate::terrain::{self, Terrain};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::collections::HashMap;
@@ -476,7 +476,9 @@ impl App {
                 r.required_dbm = req;
             }
         }
-        let mode = if p.mode == "custom" { String::new() } else { format!("{} · {:.0} dBm needed", p.mode_label(), p.required_dbm().unwrap_or(0.0)) };
+        settings.model.clutter_db = p.clutter_db;
+        let mut mode = if p.mode == "custom" { String::new() } else { format!("{} · {:.0} dBm needed · ", p.mode_label(), p.required_dbm().unwrap_or(0.0)) };
+        mode += &format!("{:.0} % of spots · {}", settings.model.location_pct, p.surroundings_label().split(" (").next().unwrap_or(""));
         let terrain = self.terrain(settings.model.terrain_zoom);
         let progress = Progress::new();
         let (tx, rx) = channel();
@@ -1128,6 +1130,30 @@ impl App {
                     }
                 }
             });
+            ui.add_space(4.0);
+            egui::Grid::new("reliab").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Surroundings");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("clutter").selected_text(p.surroundings_label()).width(200.0).show_ui(ui, |ui| {
+                        for (n, v) in SURROUNDINGS {
+                            ui.selectable_value(&mut p.clutter_db, *v, *n);
+                        }
+                    });
+                    ui.add(egui::DragValue::new(&mut p.clutter_db).speed(0.5).range(0.0..=40.0).suffix(" dB"));
+                })
+                .response
+                .on_hover_text("Buildings and trees around hand portables and mobiles, which Longley-Rice's bare terrain doesn't see");
+                ui.end_row();
+                ui.label("Spots covered");
+                let m = &mut self.settings.model;
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut m.location_pct).speed(1.0).range(50.0..=99.0).suffix(" %"));
+                    ui.label(RichText::new(format!("+{:.1} dB", coverage::location_margin(m.location_pct))).weak());
+                })
+                .response
+                .on_hover_text("At the edge of each colour, the share of spots where the signal is enough. 50 % is the median; 90 % is usual for planning.");
+                ui.end_row();
+            });
             if let Some(req) = p.required_dbm() {
                 let floor = req - p.snr_db;
                 ui.label(RichText::new(format!("Every receiver needs {req:.1} dBm ({:.2} µV pd): noise floor {floor:.1} dBm + {:.0} dB SNR.", dbm_to_uv(req), p.snr_db)).strong());
@@ -1242,7 +1268,8 @@ impl App {
                 }
             });
             ui.checkbox(&mut self.settings.base.use_site_antenna, "Base station uses this plot's antenna, height, feeder and receiver");
-            ui.label(RichText::new("Longley-Rice knows nothing of buildings, trees or a body holding the radio: put allowances for them in Losses. −107 dBm ≈ 1 µV, −113 ≈ 0.5 µV, −119 ≈ 0.25 µV.").small().weak());
+            let (c, lm) = (self.lib.plots[i].clutter_db, coverage::location_margin(self.settings.model.location_pct));
+            ui.label(RichText::new(format!("Each run adds {lm:.1} dB to every level for {:.0} % of spots, and {c:.0} dB more to hand portables and mobiles for their surroundings. Losses here are the body (hand portable) and feeder. A typical rubber duck is about −5 dBi.", self.settings.model.location_pct)).small().weak());
         });
         egui::CollapsingHeader::new("Propagation model (Longley-Rice)").show(ui, |ui| {
             let m = &mut self.settings.model;
@@ -1269,7 +1296,7 @@ impl App {
                 ui.label("Surface refractivity");
                 ui.add(egui::DragValue::new(&mut m.ns).speed(1.0).range(250.0..=400.0).suffix(" N"));
                 ui.end_row();
-                for (lbl, v) in [("Time", &mut m.time_pct), ("Location", &mut m.location_pct), ("Situation", &mut m.situation_pct)] {
+                for (lbl, v) in [("Time", &mut m.time_pct), ("Situation", &mut m.situation_pct)] {
                     ui.label(lbl);
                     ui.add(egui::DragValue::new(v).speed(1.0).range(1.0..=99.0).suffix(" %"));
                     ui.end_row();

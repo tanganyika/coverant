@@ -3,7 +3,7 @@
 //! receiving station, then a Web-Mercator image for the map.
 
 use crate::itm::{self, ItmParams, Mode};
-use crate::model::{Antenna, Receiver, Settings, Site, Station};
+use crate::model::{Antenna, LOCATION_SIGMA_DB, Receiver, Settings, Site, Station};
 use crate::terrain::{EARTH_R, Terrain, destination, distance_bearing, lonlat_to_px, metres_per_px, px_to_lonlat};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,10 @@ pub struct Level {
     pub colour: [u8; 3],
 }
 
+/// Each level's losses include the surroundings (hand portable and mobile) and the margin
+/// that puts the signal above the need at `location_pct` of spots.
 pub fn levels(st: &Station, s: &Settings) -> Vec<Level> {
+    let loc_margin = location_margin(s.model.location_pct);
     let mut out = vec![];
     for (i, r) in s.levels().into_iter().enumerate() {
         if !r.enabled {
@@ -37,9 +40,15 @@ pub fn levels(st: &Station, s: &Settings) -> Vec<Level> {
             l.loss_db = st.feeder_loss_db;
             l.required_dbm = st.rx_sensitivity_dbm;
         }
+        l.loss_db += loc_margin + if i < 2 { s.model.clutter_db } else { 0.0 };
         out.push(l);
     }
     out
+}
+
+/// dB to add so that the signal is enough at `pct` % of spots rather than at half of them.
+pub fn location_margin(pct: f64) -> f64 {
+    -LOCATION_SIGMA_DB * itm::qerfi(pct.clamp(1.0, 99.0) / 100.0)
 }
 
 /// Loss of the antenna (dB, ≥ 0) away from its peak, by azimuth from
@@ -417,3 +426,14 @@ impl Coverage {
         }
     }
 }
+
+#[cfg(test)]
+mod margin_tests {
+    #[test]
+    fn location_margin_grows_with_reliability() {
+        assert!(super::location_margin(50.0).abs() < 0.01);
+        let m90 = super::location_margin(90.0);
+        assert!((m90 - 7.05).abs() < 0.1, "{m90}");
+    }
+}
+

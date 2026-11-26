@@ -187,6 +187,8 @@ pub struct PlotDef {
     pub snr_db: f64,
     /// the receiver's noise figure plus any local noise above thermal
     pub noise_figure_db: f64,
+    /// buildings and trees around the hand portables and mobiles (dB)
+    pub clutter_db: f64,
 }
 
 impl Default for PlotDef {
@@ -210,6 +212,7 @@ impl Default for PlotDef {
             bandwidth_hz: MODES[0].bandwidth_hz,
             snr_db: MODES[0].snr_db,
             noise_figure_db: 6.0,
+            clutter_db: SURROUNDINGS[1].1,
         }
     }
 }
@@ -240,6 +243,9 @@ impl PlotDef {
     /// bandwidth, plus the noise figure, plus the SNR the mode needs. None for "custom".
     pub fn required_dbm(&self) -> Option<f64> {
         (self.mode != "custom").then(|| -174.0 + 10.0 * self.bandwidth_hz.max(1.0).log10() + self.noise_figure_db + self.snr_db)
+    }
+    pub fn surroundings_label(&self) -> String {
+        SURROUNDINGS.iter().find(|s| s.1 == self.clutter_db).map_or(format!("Custom, {:.0} dB", self.clutter_db), |s| s.0.into())
     }
     pub fn mode_label(&self) -> String {
         match MODES.iter().find(|m| m.key == self.mode.trim_end_matches('*')) {
@@ -384,6 +390,18 @@ pub const MODES: &[Mode] = &[
     Mode { key: "ft8", label: "FT8", bandwidth_hz: 2500.0, snr_db: -20.0, note: "WSJT-X reports SNR in 2500 Hz; decodes reach about −21 dB" },
 ];
 
+/// Allowances for what is around a receiver at 1.5 m, beyond what Longley-Rice's bare terrain
+/// sees. Roughly the Okumura-Hata differences from open land, rounded down.
+pub const SURROUNDINGS: &[(&str, f64)] = &[
+    ("Open (moorland, sea, open fields)", 0.0),
+    ("Rural (hedges, trees, villages)", 6.0),
+    ("Suburban", 12.0),
+    ("Urban (town centre)", 20.0),
+];
+
+/// Spread of the signal from place to place around a 1.5 m receiver (ITU-R P.1546).
+pub const LOCATION_SIGMA_DB: f64 = 5.5;
+
 pub fn preset_label(key: &str) -> &'static str {
     PRESETS.iter().find(|p| p.key == key).map_or("Custom", |p| p.label)
 }
@@ -422,13 +440,19 @@ pub struct ModelSettings {
     pub eps: f64,
     pub sgm: f64,
     pub time_pct: f64,
+    /// share of spots at the edge of the plot where the signal is enough (a log-normal
+    /// margin on top of Longley-Rice, which in point-to-point mode leaves this out)
     pub location_pct: f64,
     pub situation_pct: f64,
+    /// extra loss for hand portables and mobiles from buildings and trees around them,
+    /// set from the plot for each run
+    #[serde(skip)]
+    pub clutter_db: f64,
 }
 
 impl Default for ModelSettings {
     fn default() -> Self {
-        ModelSettings { radius_km: 40.0, detail: 1, terrain_zoom: 11, climate: 6, ns: 301.0, eps: 15.0, sgm: 0.005, time_pct: 50.0, location_pct: 50.0, situation_pct: 50.0 }
+        ModelSettings { radius_km: 40.0, detail: 1, terrain_zoom: 11, climate: 6, ns: 301.0, eps: 15.0, sgm: 0.005, time_pct: 50.0, location_pct: 90.0, situation_pct: 50.0, clutter_db: 0.0 }
     }
 }
 
@@ -457,12 +481,16 @@ pub struct Settings {
     pub view: Option<(f64, f64, f64)>,
     /// site ids whose coverage is hidden
     pub hidden: Vec<String>,
+    /// bumped when the defaults change, so older settings files are brought up to date
+    /// (missing in the first version's files)
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            handheld: Receiver { name: "Hand portable".into(), height_m: 1.5, gain_dbi: 0.0, loss_db: 6.0, required_dbm: -113.0, colour: [79, 143, 247], ..Default::default() },
+            handheld: Receiver { name: "Hand portable".into(), height_m: 1.5, gain_dbi: -5.0, loss_db: 4.0, required_dbm: -113.0, colour: [79, 143, 247], ..Default::default() },
             mobile: Receiver { name: "Mobile".into(), height_m: 1.5, gain_dbi: 3.0, loss_db: 1.0, required_dbm: -113.0, colour: [224, 64, 224], ..Default::default() },
             base: Receiver { name: "Base station".into(), height_m: 10.0, gain_dbi: 4.5, loss_db: 2.0, required_dbm: -116.0, colour: [63, 191, 95], use_site_antenna: true, ..Default::default() },
             model: ModelSettings::default(),
@@ -472,6 +500,7 @@ impl Default for Settings {
             grey_map: true,
             view: None,
             hidden: vec![],
+            version: SETTINGS_VERSION,
         }
     }
 }
@@ -508,8 +537,23 @@ fn write<T: Serialize>(name: &str, v: &T) -> Result<(), String> {
 pub fn load_sites() -> Vec<Site> {
     read("sites.json")
 }
+const SETTINGS_VERSION: u32 = 2;
+
 pub fn load_settings() -> Settings {
-    read("settings.json")
+    let mut s: Settings = read("settings.json");
+    if s.version < 2 {
+        // version 1 was too kind to hand portables: a 0 dBi rubber duck, and the median spot
+        let h = &mut s.handheld;
+        if (h.gain_dbi, h.loss_db) == (0.0, 6.0) {
+            h.gain_dbi = -5.0;
+            h.loss_db = 4.0;
+        }
+        if s.model.location_pct == 50.0 {
+            s.model.location_pct = 90.0;
+        }
+    }
+    s.version = SETTINGS_VERSION;
+    s
 }
 pub fn save_settings(s: &Settings) -> Result<(), String> {
     write("settings.json", s)
@@ -578,5 +622,12 @@ mod mode_tests {
         p.mode = "custom".into();
         assert!(p.required_dbm().is_none());
         assert_eq!(p.station(&AntennaDef::default()).rx_sensitivity_dbm, p.rx_sensitivity_dbm);
+    }
+
+    #[test]
+    fn old_settings_files_have_version_zero() {
+        let s: Settings = serde_json::from_str(r#"{"model":{"location_pct":50.0}}"#).unwrap();
+        assert_eq!(s.version, 0);
+        assert_eq!(Settings::default().version, SETTINGS_VERSION);
     }
 }

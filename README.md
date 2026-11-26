@@ -26,6 +26,10 @@ processor core.
 - **Modes.** Each plot has a mode (FM voice, FM good copy, digital voice, SSB, CW, FT8 or
   custom levels). The signal every receiver needs is the thermal noise in the mode's
   bandwidth, plus the noise figure, plus the SNR the mode needs; all three can be adjusted.
+- **Realistic margins for 1.5 m stations.** Each plot has surroundings (open, rural,
+  suburban, urban: 0, 6, 12, 20 dB) for hand portables and mobiles, and a share of spots
+  covered (default 90 %, a 5.5 dB log-normal spread as in ITU-R P.1546). Hand portables
+  default to a −5 dBi rubber duck with 4 dB body loss.
 - **Coverage** over real terrain with the Longley-Rice Irregular Terrain Model
   (ITM 1.2.2, the model Radio Mobile and SPLAT! use), laid over the map in three colours:
   - **blue**: hand portables hear the site;
