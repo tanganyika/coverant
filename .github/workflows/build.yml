@@ -1,4 +1,4 @@
-# Tests and builds Radio Sites for Linux, Windows and macOS on every push and pull request.
+# Tests and builds Coverant for Linux, Windows and macOS on every push and pull request.
 # The programs are attached to each run (Actions tab -> the run -> Artifacts); a version tag
 # (v*) also makes a GitHub release with them.
 name: Build
@@ -21,13 +21,13 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
-            bin: radio-sites
+            bin: coverant
           - os: windows-latest
             name: windows-x86_64
-            bin: radio-sites.exe
+            bin: coverant.exe
           - os: macos-latest
             name: macos-arm64
-            bin: radio-sites
+            bin: coverant
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          D=radio-sites-${{ matrix.name }}
+          D=coverant-${{ matrix.name }}
           mkdir -p $D dist
           cp target/release/${{ matrix.bin }} README.md LICENSE $D/
           if [ "${{ runner.os }}" = Windows ]; then 7z a dist/$D.zip $D >/dev/null; else tar czf dist/$D.tar.gz $D; fi

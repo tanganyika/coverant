@@ -1,5 +1,5 @@
 [package]
-name = "radio-sites"
+name = "coverant"
 version = "0.1.0"
 edition = "2024"
 description = "Radio coverage planner: sites, antennas and Longley-Rice coverage maps"

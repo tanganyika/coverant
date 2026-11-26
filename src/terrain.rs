@@ -65,18 +65,19 @@ pub fn distance_bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> (f64, f64
 
 pub fn http_get(url: &str) -> Result<Vec<u8>, String> {
     let mut r = ureq::get(url)
-        .header("User-Agent", concat!("radio-sites/", env!("CARGO_PKG_VERSION"), " (amateur radio coverage planner)"))
+        .header("User-Agent", concat!("coverant/", env!("CARGO_PKG_VERSION"), " (amateur radio coverage planner)"))
         .call()
         .map_err(|e| format!("Could not download {url}: {e}"))?;
     r.body_mut().with_config().limit(8 << 20).read_to_vec().map_err(|e| format!("Could not download {url}: {e}"))
 }
 
-/// The program's cache folder (terrain and map tiles). `RADIOSITES_CACHE_DIR` overrides it.
+/// The program's cache folder (terrain and map tiles). `COVERANT_CACHE_DIR` overrides it.
 pub fn cache_root() -> PathBuf {
-    if let Some(d) = std::env::var_os("RADIOSITES_CACHE_DIR") {
+    if let Some(d) = std::env::var_os("COVERANT_CACHE_DIR") {
         return PathBuf::from(d);
     }
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("radio-sites")
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    crate::model::adopt_old_folder(&base.join("radio-sites"), base.join("coverant"))
 }
 
 // ------------------------------------------------------------------ elevation
@@ -300,7 +301,7 @@ mod tests {
     fn cleanup_keeps_tiles_other_sites_use() {
         let dir = std::env::temp_dir().join(format!("rs-cleanup-{}", std::process::id()));
         // SAFETY: the only test that touches the environment
-        unsafe { std::env::set_var("RADIOSITES_CACHE_DIR", &dir) };
+        unsafe { std::env::set_var("COVERANT_CACHE_DIR", &dir) };
         let a = (52.33, -0.18, 20_000.0); // deleted
         let b = (52.50, 0.10, 20_000.0); // kept, overlapping a
         let c = (51.50, -1.50, 5_000.0); // unrelated cache

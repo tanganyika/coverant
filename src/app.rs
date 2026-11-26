@@ -604,7 +604,7 @@ impl App {
                 }
             });
             ui.menu_button("Help", |ui| {
-                if ui.button("About Radio Sites").clicked() {
+                if ui.button("About Coverant").clicked() {
                     self.show_about = true;
                     ui.close();
                 }
@@ -1515,8 +1515,8 @@ impl App {
 
     fn about(&mut self, ctx: &egui::Context) {
         let mut open = self.show_about;
-        egui::Window::new("About Radio Sites").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-            ui.heading(format!("Radio Sites {}", env!("CARGO_PKG_VERSION")));
+        egui::Window::new("About Coverant").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            ui.heading(format!("Coverant {}", env!("CARGO_PKG_VERSION")));
             ui.label("Coverage planning for radio sites: Longley-Rice (ITM 1.2.2) over real terrain.");
             ui.add_space(6.0);
             ui.label(RichText::new(terrain::ATTRIBUTION).small());

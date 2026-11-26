@@ -696,6 +696,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "coverant"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "egui",
+ "image",
+ "num-complex",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2719,22 +2735,6 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
-
-[[package]]
-name = "radio-sites"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "eframe",
- "egui",
- "image",
- "num-complex",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "ureq",
-]
 
 [[package]]
 name = "range-alloc"

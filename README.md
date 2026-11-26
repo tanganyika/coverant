@@ -1,4 +1,4 @@
-# Radio Sites
+# Coverant
 
 A coverage planner for radio sites, in the spirit of VE2DBE's Radio Mobile, for Linux,
 Windows and macOS. It is written in Rust with egui, with the same look as
@@ -54,7 +54,7 @@ cargo run --release
 ```
 
 The first build takes a few minutes. The program is then
-`target/release/radio-sites` (`radio-sites.exe` on Windows), which can be copied anywhere.
+`target/release/coverant` (`coverant.exe` on Windows), which can be copied anywhere.
 On Linux, egui needs the usual X11/Wayland libraries (on Debian/Ubuntu:
 `sudo apt install libxkbcommon-x11-0 libgl1`).
 
@@ -81,11 +81,11 @@ offline.
 
 | What | Where |
 |---|---|
-| Sites, settings, plots | `~/.local/share/radio-sites`, `%APPDATA%\radio-sites`, `~/Library/Application Support/radio-sites` |
-| Terrain and map tiles | `~/.cache/radio-sites`, `%LOCALAPPDATA%\radio-sites`, `~/Library/Caches/radio-sites` |
+| Sites, settings, plots | `~/.local/share/coverant`, `%APPDATA%\coverant`, `~/Library/Application Support/coverant` |
+| Terrain and map tiles | `~/.cache/coverant`, `%LOCALAPPDATA%\coverant`, `~/Library/Caches/coverant` |
 
-`RADIOSITES_DATA_DIR` and `RADIOSITES_CACHE_DIR` move them. File → Open data folder opens
-the first. Set `RADIOSITES_RENDERER=glow` to use plain OpenGL if the default renderer won't
+`COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them. File → Open data folder opens
+the first. Set `COVERANT_RENDERER=glow` to use plain OpenGL if the default renderer won't
 start (it falls back on its own too).
 
 ## Code

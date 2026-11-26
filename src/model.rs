@@ -1,7 +1,7 @@
 //! Sites, the antenna library, coverage plots (a site with an antenna and a radio),
 //! the receive levels and the propagation settings, and where they are kept between runs:
-//! ~/.local/share/radio-sites, %APPDATA%\radio-sites or
-//! ~/Library/Application Support/radio-sites (`RADIOSITES_DATA_DIR` overrides it).
+//! ~/.local/share/coverant, %APPDATA%\coverant or
+//! ~/Library/Application Support/coverant (`COVERANT_DATA_DIR` overrides it).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -515,10 +515,19 @@ impl Settings {
 // ------------------------------------------------------------------ storage
 
 pub fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("RADIOSITES_DATA_DIR") {
+    if let Some(d) = std::env::var_os("COVERANT_DATA_DIR") {
         return PathBuf::from(d);
     }
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("radio-sites")
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    adopt_old_folder(&base.join("radio-sites"), base.join("coverant"))
+}
+
+/// The program was called Radio Sites at first: move its folder to the new name once.
+pub fn adopt_old_folder(old: &std::path::Path, new: PathBuf) -> PathBuf {
+    if !new.exists() && old.is_dir() {
+        let _ = std::fs::rename(old, &new);
+    }
+    new
 }
 
 fn read<T: for<'a> Deserialize<'a> + Default>(name: &str) -> T {
