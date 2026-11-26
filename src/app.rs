@@ -872,10 +872,14 @@ impl App {
         let (resp, proj) = map::show(ui, &mut self.view, &mut self.tiles, self.settings.basemap, self.settings.grey_map, !self.dragging_pin);
         let painter = ui.painter_at(proj.rect);
 
-        // coverage overlays
+        // coverage overlays, left off while sites are being placed so the map can be read
+        let show_cov = self.tab != Tab::Sites;
+        if !show_cov {
+            self.popup = None;
+        }
         let tint = Color32::from_white_alpha((self.settings.opacity * 255.0) as u8);
         for s in &self.sites {
-            if self.settings.hidden.contains(&s.id) {
+            if !show_cov || self.settings.hidden.contains(&s.id) {
                 continue;
             }
             let Some(p) = self.plots.get_mut(&s.id) else { continue };
@@ -931,7 +935,7 @@ impl App {
                 } else if let Some((i, _)) = pin_rects.iter().rev().find(|(_, r)| r.contains(p)) {
                     self.selected = Some(*i);
                     self.popup = None;
-                } else {
+                } else if show_cov {
                     self.popup = Some(Popup { lat, lon });
                 }
             }
@@ -950,6 +954,16 @@ impl App {
                     legend_levels = Some(p.cov.meta.levels.clone());
                     break;
                 }
+            }
+        }
+        if !show_cov {
+            legend_levels = None;
+            if !self.plots.is_empty() {
+                let painter = ui.painter_at(proj.rect);
+                let g = painter.layout_no_wrap("Coverage is hidden while you edit sites".into(), egui::FontId::proportional(12.0), crate::theme::ink_soft());
+                let r = egui::Rect::from_min_size(proj.rect.right_top() + Vec2::new(-g.size().x - 22.0, 10.0), g.size() + Vec2::new(12.0, 6.0));
+                painter.rect_filled(r, 6.0, crate::theme::label_bg());
+                painter.galley(r.min + Vec2::new(6.0, 3.0), g, crate::theme::ink_soft());
             }
         }
         if let Some(levels) = legend_levels {
