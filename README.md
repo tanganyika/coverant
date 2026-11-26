@@ -23,6 +23,9 @@ processor core.
   receiver sensitivity and polarisation. Copy a plot to try another antenna at the same site,
   or the same antenna at another site; show or hide each one on the map. When a run
   finishes the map zooms to fit it.
+- **Modes.** Each plot has a mode (FM voice, FM good copy, digital voice, SSB, CW, FT8 or
+  custom levels). The signal every receiver needs is the thermal noise in the mode's
+  bandwidth, plus the noise figure, plus the SNR the mode needs; all three can be adjusted.
 - **Coverage** over real terrain with the Longley-Rice Irregular Terrain Model
   (ITM 1.2.2, the model Radio Mobile and SPLAT! use), laid over the map in three colours:
   - **blue**: hand portables hear the site;

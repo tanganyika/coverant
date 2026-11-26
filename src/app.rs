@@ -5,7 +5,7 @@ use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
 use crate::itm::CLIMATES;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
-use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, PRESETS};
+use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS};
 use crate::terrain::{self, Terrain};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::collections::HashMap;
@@ -471,12 +471,21 @@ impl App {
         let st = p.station(&ant);
         let mut settings = self.settings.clone();
         settings.model.radius_km = p.radius(&site, self.settings.model.radius_km);
+        if let Some(req) = p.required_dbm() {
+            for r in [&mut settings.handheld, &mut settings.mobile, &mut settings.base] {
+                r.required_dbm = req;
+            }
+        }
+        let mode = if p.mode == "custom" { String::new() } else { format!("{} · {:.0} dBm needed", p.mode_label(), p.required_dbm().unwrap_or(0.0)) };
         let terrain = self.terrain(settings.model.terrain_zoom);
         let progress = Progress::new();
         let (tx, rx) = channel();
         let p2 = progress.clone();
         std::thread::spawn(move || {
-            let r = coverage::run(&site, &st, &settings, &terrain, &p2);
+            let r = coverage::run(&site, &st, &settings, &terrain, &p2).map(|mut c| {
+                c.meta.mode = mode;
+                c
+            });
             let _ = tx.send(r);
         });
         self.status = format!("Plotting {} on {} threads…", p.name, self.threads);
@@ -1066,9 +1075,6 @@ impl App {
                 ui.label("Feeder loss");
                 ui.add(egui::DragValue::new(&mut p.feeder_loss_db).speed(0.1).range(0.0..=30.0).suffix(" dB"));
                 ui.end_row();
-                ui.label("Receiver sensitivity");
-                ui.add(egui::DragValue::new(&mut p.rx_sensitivity_dbm).speed(0.5).range(-150.0..=-50.0).suffix(" dBm"));
-                ui.end_row();
                 ui.label("Polarisation");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut p.vertical, true, "Vertical");
@@ -1079,18 +1085,57 @@ impl App {
             if let Some(a) = &ant {
                 let st = p.station(a);
                 let eirp = st.eirp_dbm();
-                ui.label(
-                    RichText::new(format!(
-                        "TX {:.1} dBm · EIRP {:.1} dBm ({}) · ERP {} · RX {:.2} µV pd",
-                        st.tx_dbm(),
-                        eirp,
-                        watts(eirp),
-                        watts(eirp - 2.15),
-                        dbm_to_uv(st.rx_sensitivity_dbm)
-                    ))
-                    .small()
-                    .weak(),
-                );
+                ui.label(RichText::new(format!("TX {:.1} dBm · EIRP {:.1} dBm ({}) · ERP {}", st.tx_dbm(), eirp, watts(eirp), watts(eirp - 2.15))).small().weak());
+            }
+        });
+        card(ui, "Mode", |ui| {
+            let p = &mut self.lib.plots[i];
+            egui::Grid::new("mode").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Mode");
+                egui::ComboBox::from_id_salt("mode").selected_text(p.mode_label()).width(240.0).show_ui(ui, |ui| {
+                    for m in MODES {
+                        if ui.selectable_label(p.mode == m.key, m.label).clicked() {
+                            p.set_mode(m);
+                        }
+                    }
+                    if ui.selectable_label(p.mode == "custom", "Custom levels").on_hover_text("Each receive level uses its own “Needs”").clicked() {
+                        p.mode = "custom".into();
+                    }
+                });
+                ui.end_row();
+                if p.mode == "custom" {
+                    ui.label("Base receiver needs");
+                    ui.add(egui::DragValue::new(&mut p.rx_sensitivity_dbm).speed(0.5).range(-170.0..=-50.0).suffix(" dBm"));
+                    ui.end_row();
+                } else {
+                    let before = (p.bandwidth_hz, p.snr_db);
+                    ui.label("Bandwidth");
+                    ui.add(egui::DragValue::new(&mut p.bandwidth_hz).speed(50.0).range(10.0..=200000.0).suffix(" Hz"));
+                    ui.end_row();
+                    ui.label("SNR needed");
+                    ui.add(egui::DragValue::new(&mut p.snr_db).speed(0.5).range(-40.0..=40.0).suffix(" dB"));
+                    ui.end_row();
+                    ui.label("Noise figure");
+                    ui.add(egui::DragValue::new(&mut p.noise_figure_db).speed(0.25).range(0.0..=40.0).suffix(" dB"))
+                        .on_hover_text("The receiver's noise figure plus any local noise above thermal. Raise it for a noisy town site.");
+                    ui.end_row();
+                    // keep the mode's name only while its numbers are the standard ones
+                    if before != (p.bandwidth_hz, p.snr_db) {
+                        if let Some(m) = MODES.iter().find(|m| m.key == p.mode.trim_end_matches('*')) {
+                            let std = (m.bandwidth_hz, m.snr_db) == (p.bandwidth_hz, p.snr_db);
+                            p.mode = if std { m.key.into() } else { format!("{}*", m.key) };
+                        }
+                    }
+                }
+            });
+            if let Some(req) = p.required_dbm() {
+                let floor = req - p.snr_db;
+                ui.label(RichText::new(format!("Every receiver needs {req:.1} dBm ({:.2} µV pd): noise floor {floor:.1} dBm + {:.0} dB SNR.", dbm_to_uv(req), p.snr_db)).strong());
+                if let Some(m) = MODES.iter().find(|m| m.key == p.mode.trim_end_matches('*')) {
+                    ui.label(RichText::new(m.note).small().weak());
+                }
+            } else {
+                ui.label(RichText::new("Each receive level below uses its own “Needs”.").small().weak());
             }
         });
         card(ui, "Run", |ui| {
@@ -1185,6 +1230,7 @@ impl App {
         card(ui, "Receive levels", |ui| {
             ui.label(RichText::new("Each colour shows where that kind of station hears the site at or above the signal it needs. Hand portables are drawn on top.").small().weak());
             let st = ant.as_ref().map(|a| self.lib.plots[i].station(a)).unwrap_or_default();
+            let needs = self.lib.plots[i].required_dbm();
             egui::Grid::new("levels").num_columns(6).spacing([6.0, 4.0]).show(ui, |ui| {
                 for h in ["", "Station", "Height", "Gain", "Losses", "Needs"] {
                     ui.label(RichText::new(h).small().weak());
@@ -1192,7 +1238,7 @@ impl App {
                 ui.end_row();
                 let s = &mut self.settings;
                 for (k, r) in [&mut s.handheld, &mut s.mobile, &mut s.base].into_iter().enumerate() {
-                    level_row(ui, r, k == 2, &st);
+                    level_row(ui, r, k == 2, &st, needs);
                 }
             });
             ui.checkbox(&mut self.settings.base.use_site_antenna, "Base station uses this plot's antenna, height, feeder and receiver");
@@ -1355,7 +1401,7 @@ impl App {
         for s in &self.lib.plots {
             if let Some(p) = self.results.get(&s.id) {
                 if !self.settings.hidden.contains(&s.id) {
-                    legend_levels = Some(p.cov.meta.levels.clone());
+                    legend_levels = Some((p.cov.meta.mode.clone(), p.cov.meta.levels.clone()));
                     break;
                 }
             }
@@ -1371,7 +1417,7 @@ impl App {
             }
         }
         if let Some(levels) = legend_levels {
-            legend(ui, &proj, &levels);
+            legend(ui, &proj, &levels.0, &levels.1);
         }
         map::decorations(ui, &proj, &mut self.view, self.settings.basemap, " · Elevation: Mapzen/AWS Terrain Tiles", self.tiles.offline);
         let _ = terrain::ATTRIBUTION;
@@ -1661,7 +1707,7 @@ fn list_row_with(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, 
     ui.interact(r.response.rect, ui.make_persistent_id(id), egui::Sense::click())
 }
 
-fn level_row(ui: &mut egui::Ui, r: &mut Receiver, base: bool, st: &model::Station) {
+fn level_row(ui: &mut egui::Ui, r: &mut Receiver, base: bool, st: &model::Station, needs: Option<f64>) {
     ui.checkbox(&mut r.enabled, "");
     ui.horizontal(|ui| {
         ui.color_edit_button_srgb(&mut r.colour);
@@ -1680,22 +1726,36 @@ fn level_row(ui: &mut egui::Ui, r: &mut Receiver, base: bool, st: &model::Statio
         ui.add(egui::DragValue::new(&mut r.height_m).speed(0.1).range(0.5..=3000.0).suffix(" m"));
         ui.add(egui::DragValue::new(&mut r.gain_dbi).speed(0.1).range(-20.0..=40.0).suffix(" dBi"));
         ui.add(egui::DragValue::new(&mut r.loss_db).speed(0.1).range(0.0..=60.0).suffix(" dB"));
-        ui.add(egui::DragValue::new(&mut r.required_dbm).speed(0.5).range(-150.0..=-30.0).suffix(" dBm"));
+        match needs {
+            Some(n) => {
+                ui.label(RichText::new(format!("{n:.0} dBm")).weak()).on_hover_text("Set by the mode");
+            }
+            None => {
+                ui.add(egui::DragValue::new(&mut r.required_dbm).speed(0.5).range(-170.0..=-30.0).suffix(" dBm"));
+            }
+        }
     }
     ui.end_row();
 }
 
-fn legend(ui: &mut egui::Ui, proj: &Projection, levels: &[coverage::Level]) {
+fn legend(ui: &mut egui::Ui, proj: &Projection, mode: &str, levels: &[coverage::Level]) {
     let painter = ui.painter_at(proj.rect);
     let font = egui::FontId::proportional(12.0);
     let lines: Vec<String> = levels.iter().map(|l| format!("{} ≥ {:.0} dBm", l.name, l.required_dbm)).collect();
-    let w = lines.iter().map(|t| painter.layout_no_wrap(t.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max) + 34.0;
-    let h = lines.len() as f32 * 19.0 + 12.0;
+    let mut w = lines.iter().map(|t| painter.layout_no_wrap(t.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max) + 34.0;
+    let top = if mode.is_empty() { 0.0 } else { 19.0 };
+    if !mode.is_empty() {
+        w = w.max(painter.layout_no_wrap(mode.to_string(), font.clone(), Color32::WHITE).size().x + 20.0);
+    }
+    let h = lines.len() as f32 * 19.0 + 12.0 + top;
     let r = egui::Rect::from_min_size(proj.rect.right_bottom() - Vec2::new(w + 12.0, h + 30.0), Vec2::new(w, h));
     painter.rect_filled(r, 8.0, crate::theme::label_bg());
     painter.rect_stroke(r, 8.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+    if !mode.is_empty() {
+        painter.text(egui::Pos2::new(r.left() + 10.0, r.top() + 8.0), egui::Align2::LEFT_TOP, mode, egui::FontId::proportional(12.0), crate::theme::ink_soft());
+    }
     for (k, (l, t)) in levels.iter().zip(lines).enumerate() {
-        let y = r.top() + 8.0 + k as f32 * 19.0;
+        let y = r.top() + 8.0 + top + k as f32 * 19.0;
         painter.rect_filled(egui::Rect::from_min_size(egui::Pos2::new(r.left() + 10.0, y + 2.0), Vec2::splat(12.0)), 3.0, Color32::from_rgb(l.colour[0], l.colour[1], l.colour[2]));
         painter.text(egui::Pos2::new(r.left() + 28.0, y), egui::Align2::LEFT_TOP, t, font.clone(), crate::theme::ink());
     }

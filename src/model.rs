@@ -180,6 +180,13 @@ pub struct PlotDef {
     pub vertical: bool,
     /// None = the site's default radius
     pub radius_km: Option<f64>,
+    /// a key from MODES; "custom" leaves each receive level's own "needs" alone
+    pub mode: String,
+    pub bandwidth_hz: f64,
+    /// signal-to-noise ratio the mode needs, in that bandwidth
+    pub snr_db: f64,
+    /// the receiver's noise figure plus any local noise above thermal
+    pub noise_figure_db: f64,
 }
 
 impl Default for PlotDef {
@@ -199,6 +206,10 @@ impl Default for PlotDef {
             rx_sensitivity_dbm: st.rx_sensitivity_dbm,
             vertical: true,
             radius_km: None,
+            mode: MODES[0].key.into(),
+            bandwidth_hz: MODES[0].bandwidth_hz,
+            snr_db: MODES[0].snr_db,
+            noise_figure_db: 6.0,
         }
     }
 }
@@ -210,7 +221,7 @@ impl PlotDef {
             freq_mhz: self.freq_mhz,
             power_w: self.power_w,
             feeder_loss_db: self.feeder_loss_db,
-            rx_sensitivity_dbm: self.rx_sensitivity_dbm,
+            rx_sensitivity_dbm: self.required_dbm().unwrap_or(self.rx_sensitivity_dbm),
             vertical: self.vertical,
             antenna: Antenna {
                 preset: a.preset.clone(),
@@ -224,6 +235,23 @@ impl PlotDef {
                 v_beamwidth: a.v_beamwidth,
             },
         }
+    }
+    /// The signal every receiver needs for this plot's mode: thermal noise in the
+    /// bandwidth, plus the noise figure, plus the SNR the mode needs. None for "custom".
+    pub fn required_dbm(&self) -> Option<f64> {
+        (self.mode != "custom").then(|| -174.0 + 10.0 * self.bandwidth_hz.max(1.0).log10() + self.noise_figure_db + self.snr_db)
+    }
+    pub fn mode_label(&self) -> String {
+        match MODES.iter().find(|m| m.key == self.mode.trim_end_matches('*')) {
+            Some(m) if self.mode.ends_with('*') => format!("{} (adjusted)", m.label),
+            Some(m) => m.label.into(),
+            None => "Custom levels".into(),
+        }
+    }
+    pub fn set_mode(&mut self, m: &Mode) {
+        self.mode = m.key.into();
+        self.bandwidth_hz = m.bandwidth_hz;
+        self.snr_db = m.snr_db;
     }
     pub fn radius(&self, site: &Site, general_km: f64) -> f64 {
         self.radius_km.unwrap_or(site.default_radius(general_km))
@@ -296,6 +324,9 @@ impl Library {
                     rx_sensitivity_dbm: st.rx_sensitivity_dbm,
                     vertical: st.vertical,
                     radius_km: site.plot_radius_km,
+                    // the old plots used each receive level's own "needs"
+                    mode: "custom".into(),
+                    ..Default::default()
                 });
             }
             self.sites[i].plot_radius_km = None;
@@ -332,6 +363,25 @@ pub const PRESETS: &[Preset] = &[
     Preset { key: "yagi_3", label: "3-element Yagi", gain: 7.5, directional: true, v_bw: 90.0, h_bw: 70.0, fb: 15.0 },
     Preset { key: "yagi_6", label: "6-element Yagi", gain: 11.0, directional: true, v_bw: 45.0, h_bw: 40.0, fb: 20.0 },
     Preset { key: "panel", label: "Panel / sector (90°)", gain: 12.0, directional: true, v_bw: 15.0, h_bw: 90.0, fb: 25.0 },
+];
+
+/// Operating modes and what they need to hold a contact: the receiver's noise bandwidth and
+/// the signal-to-noise ratio in it.
+pub struct Mode {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub bandwidth_hz: f64,
+    pub snr_db: f64,
+    pub note: &'static str,
+}
+
+pub const MODES: &[Mode] = &[
+    Mode { key: "fm", label: "FM voice", bandwidth_hz: 11000.0, snr_db: 12.0, note: "about 12 dB SINAD: readable through some noise" },
+    Mode { key: "fm_good", label: "FM voice, good copy", bandwidth_hz: 11000.0, snr_db: 20.0, note: "near full quieting, comfortable for a net" },
+    Mode { key: "dv", label: "Digital voice (DMR, D-STAR, C4FM)", bandwidth_hz: 9000.0, snr_db: 10.0, note: "about 5 % bit errors: the edge before audio breaks up" },
+    Mode { key: "ssb", label: "SSB voice", bandwidth_hz: 2400.0, snr_db: 10.0, note: "a workable SSB contact; 3 to 6 dB is just copyable" },
+    Mode { key: "cw", label: "CW", bandwidth_hz: 500.0, snr_db: 6.0, note: "ear copy in a 500 Hz filter" },
+    Mode { key: "ft8", label: "FT8", bandwidth_hz: 2500.0, snr_db: -20.0, note: "WSJT-X reports SNR in 2500 Hz; decodes reach about −21 dB" },
 ];
 
 pub fn preset_label(key: &str) -> &'static str {
@@ -510,5 +560,23 @@ mod tests {
         let j = serde_json::to_string(&lib.sites).unwrap();
         assert!(!j.contains("station") && !j.contains("plot_radius_km"));
         assert!(!lib.migrate());
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn mode_sets_required_signal() {
+        let mut p = PlotDef::default();
+        let fm = p.required_dbm().unwrap();
+        assert!((fm - (-174.0 + 40.414 + 6.0 + 12.0)).abs() < 0.01, "{fm}");
+        p.set_mode(MODES.iter().find(|m| m.key == "ft8").unwrap());
+        let ft8 = p.required_dbm().unwrap();
+        assert!(ft8 < fm - 30.0, "{ft8}");
+        p.mode = "custom".into();
+        assert!(p.required_dbm().is_none());
+        assert_eq!(p.station(&AntennaDef::default()).rx_sensitivity_dbm, p.rx_sensitivity_dbm);
     }
 }

@@ -65,6 +65,9 @@ pub struct Stats {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Meta {
+    /// the operating mode the levels were set for (empty in older plots)
+    #[serde(default)]
+    pub mode: String,
     pub site_lat: f64,
     pub site_lon: f64,
     pub radius_km: f64,
@@ -298,6 +301,7 @@ pub fn run(site: &Site, st: &Station, settings: &Settings, terrain: &Terrain, pr
     let px_area = metres_per_px(lat0, zoom).powi(2) / 1e6;
     let stats = levels.iter().zip(&counts).map(|(l, &c)| Stats { name: l.name.clone(), area_km2: c as f64 * px_area, colour: l.colour }).collect();
     let meta = Meta {
+        mode: String::new(),
         site_lat: lat0,
         site_lon: lon0,
         radius_km: radius / 1000.0,
