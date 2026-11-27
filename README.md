@@ -128,7 +128,7 @@ The first build takes a few minutes. The program is then
 On Linux, egui needs the usual X11/Wayland libraries (on Debian/Ubuntu:
 `sudo apt install libxkbcommon-x11-0 libgl1`). `cargo install cargo-deb && cargo deb`
 builds the .deb in `target/debian/`. On Windows, with [Inno Setup](https://jrsoftware.org/isinfo.php)
-installed, `iscc /DVersion=0.4.0 packaging\windows\coverant.iss` builds the installer in `dist\`.
+installed, `iscc /DVersion=0.4.1 packaging\windows\coverant.iss` builds the installer in `dist\`.
 
 Pushing to GitHub builds Windows, macOS and Linux programs with GitHub Actions
 (`.github/workflows/build.yml`); a `v*` tag makes a release with them.

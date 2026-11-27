@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-11-27)
 
 - **Windows start-up fixes.** Coverant uses DirectX 12 on Windows rather than letting wgpu
   pick Vulkan, which old Intel drivers crash on. If the graphics driver still crashes it

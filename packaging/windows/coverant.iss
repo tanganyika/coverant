@@ -1,5 +1,5 @@
 ; Inno Setup script for the Windows installer (built by CI; locally:
-; iscc /DVersion=0.4.0 packaging\windows\coverant.iss).
+; iscc /DVersion=0.4.1 packaging\windows\coverant.iss).
 ; Installs for the current user by default (no administrator rights needed), or for all users
 ; if chosen; Start menu entry, optional desktop shortcut, and an entry in Settings -> Apps to
 ; uninstall it. Uninstalling leaves the user's sites and the terrain cache in place.
