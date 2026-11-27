@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver as Rx, channel};
 use std::sync::Arc;
 
+mod io;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     Sites,
@@ -177,6 +179,10 @@ pub struct App {
     frame: u64,
     threads: usize,
     shot: Option<Shot>,
+    import: Option<io::ImportState>,
+    restore: Option<io::RestoreState>,
+    /// automated tests: accept the open dialog
+    accept: bool,
 }
 
 impl App {
@@ -252,6 +258,9 @@ impl App {
             frame: 0,
             threads,
             shot: shot.map(|path| Shot { path, requested: false, done: Arc::new(AtomicBool::new(false)) }),
+            import: None,
+            restore: None,
+            accept: false,
         }
     }
 
@@ -1156,6 +1165,8 @@ impl App {
                     ui.close();
                 }
                 ui.separator();
+                self.io_menu(ui);
+                ui.separator();
                 if ui.button("Open data folder").clicked() {
                     let _ = std::fs::create_dir_all(model::data_dir());
                     open_folder(&model::data_dir());
@@ -1207,15 +1218,21 @@ impl App {
     }
 
     fn zoom_to_sites(&mut self) {
-        if self.lib.sites.is_empty() {
+        let pts: Vec<(f64, f64)> = self.lib.sites.iter().map(|s| (s.lat, s.lon)).collect();
+        self.zoom_to(&pts);
+    }
+
+    /// Centre the map on these points, zoomed to show them all.
+    fn zoom_to(&mut self, pts: &[(f64, f64)]) {
+        if pts.is_empty() {
             return;
         }
         let (mut a, mut b, mut c, mut d) = (90.0f64, -90.0f64, 180.0f64, -180.0f64);
-        for s in &self.lib.sites {
-            a = a.min(s.lat);
-            b = b.max(s.lat);
-            c = c.min(s.lon);
-            d = d.max(s.lon);
+        for &(lat, lon) in pts {
+            a = a.min(lat);
+            b = b.max(lat);
+            c = c.min(lon);
+            d = d.max(lon);
         }
         self.view.lat = (a + b) / 2.0;
         self.view.lon = (c + d) / 2.0;
@@ -1260,10 +1277,13 @@ impl App {
                 if ui.add(egui::Button::new(RichText::new("＋ New site").color(Color32::WHITE)).fill(crate::theme::ACCENT)).on_hover_text("Then click the map, or type the location below").clicked() {
                     self.new_site(self.view.lat, self.view.lon, true);
                 }
+                if ui.button("Import…").on_hover_text("Sites from a GPX, KML or GeoJSON file").clicked() {
+                    self.pick_import();
+                }
             });
         });
         if self.lib.sites.is_empty() {
-            ui.label(RichText::new("No sites yet. Press “New site”, or right-click the map where a site is.").weak());
+            ui.label(RichText::new("No sites yet. Press “New site”, right-click the map where a site is, or import them from a GPX, KML or GeoJSON file.").weak());
         }
         let mut select = None;
         let mut goto = None;
@@ -2372,6 +2392,8 @@ impl eframe::App for App {
             };
         }
         help::window(&ctx, &mut self.help);
+        self.import_window(&ctx);
+        self.restore_window(&ctx);
         if self.ask_quit {
             egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(&ctx, |ui| {
                 ui.label("Your sites have changes that haven't been saved.");

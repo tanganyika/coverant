@@ -15,6 +15,10 @@ processor core.
   Each site can download the terrain around it when saved, out to a distance you choose,
   which is also the default radius of its plots. Deleting a site removes the terrain only
   it used.
+- **Backup, import and export.** File → Back up everything writes sites, antennas, plots,
+  links and settings to one file; Restore replaces what you have or adds to it, after
+  keeping a copy. Sites can be imported from GPX, KML or GeoJSON (with a preview that skips
+  ones you already have) and exported to any of the three.
 - **An antenna library, apart from the sites.** Gain, omni or directional (horizontal
   beamwidth, front/back ratio) and vertical beamwidth. Presets fill in typical ground planes,
   dipoles, collinears, Yagis and panels.
@@ -67,7 +71,7 @@ Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubu
 (Apple Silicon) tarball. For the package:
 
 ```
-sudo apt install ./coverant_0.3.1-1_amd64.deb
+sudo apt install ./coverant_0.4.0-1_amd64.deb
 ```
 
 It adds Coverant to the applications menu (under Ham Radio / Science).
@@ -114,7 +118,8 @@ offline.
 
 `COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them. File → Open data folder opens
 the first. Set `COVERANT_RENDERER=glow` to use plain OpenGL if the default renderer won't
-start (it falls back on its own too).
+start (it falls back on its own too). On Linux the file windows use the desktop portal
+(`xdg-desktop-portal`), which most desktops already have.
 
 ## Code
 

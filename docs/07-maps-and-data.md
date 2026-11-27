@@ -13,7 +13,7 @@ Heights come from the Mapzen/AWS Terrain Tiles (SRTM, EU-DEM and others), at abo
 - Sites, antennas, plots, links and settings: `~/.local/share/coverant` on Linux, `%APPDATA%\coverant` on Windows, `~/Library/Application Support/coverant` on macOS. **File → Open data folder** opens it.
 - Terrain and map tiles: `~/.cache/coverant`, `%LOCALAPPDATA%\coverant` or `~/Library/Caches/coverant`.
 
-The environment variables `COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them. Copy the data folder to move your work to another computer.
+The environment variables `COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them. To move your work to another computer, use **File → Back up everything…** and restore the backup there. Copying the data folder also works. See **Backup, import and export**.
 
 ## If it won't start
 

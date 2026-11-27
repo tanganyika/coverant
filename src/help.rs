@@ -10,7 +10,8 @@ pub const PAGES: &[(&str, &str)] = &[
     ("Links", include_str!("../docs/05-links.md")),
     ("Radio horizon", include_str!("../docs/06-horizon.md")),
     ("Maps, terrain and data", include_str!("../docs/07-maps-and-data.md")),
-    ("Tips and shortcuts", include_str!("../docs/08-tips.md")),
+    ("Backup, import and export", include_str!("../docs/08-backup-and-import.md")),
+    ("Tips and shortcuts", include_str!("../docs/09-tips.md")),
 ];
 
 /// The page for a tab.

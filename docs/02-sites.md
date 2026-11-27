@@ -10,6 +10,7 @@ A site is a place: a position, a ground height and a name. Antennas and radios a
   - degrees, minutes and seconds: `52°12'19"N 0°07'18"E`
   - Maidenhead locators of 4 to 10 characters: `JO02bf`
   - OS grid references: `TL 450 585`, `TL4500058500`, or eastings,northings
+- Or press **Import…** to read sites from a GPX, KML or GeoJSON file. See **Backup, import and export**.
 - Drag the selected site's pin to fine-tune it. **Pick on map** lets you click a new position.
 
 The panel shows the position in every format and the ground height from the terrain data. Tick **Set ground height myself** if you know better, for example on a roof or a tower.

@@ -11,6 +11,7 @@ mod link;
 mod map;
 mod model;
 mod terrain;
+mod transfer;
 mod theme;
 
 use std::path::PathBuf;
@@ -34,6 +35,9 @@ fn main() -> eframe::Result<()> {
     let mut link: Option<usize> = None;
     let mut hz = false;
     let mut help: Option<usize> = None;
+    let mut import: Option<PathBuf> = None;
+    let mut restore: Option<PathBuf> = None;
+    let mut accept = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => shot = args.next().map(PathBuf::from),
@@ -44,6 +48,9 @@ fn main() -> eframe::Result<()> {
             "--link" => link = args.next().and_then(|v| v.parse().ok()),
             "--select" => select = args.next().and_then(|v| v.parse().ok()),
             "--save" => save = true,
+            "--accept" => accept = true,
+            "--import" => import = args.next().map(PathBuf::from),
+            "--restore" => restore = args.next().map(PathBuf::from),
             "--popup" => popup = args.next().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))),
             "--help" | "-h" => {
                 println!("coverant [--tab sites|antenna|coverage] [--plot] [--screenshot out.png]");
@@ -68,6 +75,15 @@ fn main() -> eframe::Result<()> {
         options.clone(),
         Box::new(move |cc| {
             let mut a = app::App::new(cc, tab, shot.clone());
+            if let Some(p) = &import {
+                a.open_import(p);
+            }
+            if let Some(p) = &restore {
+                a.open_restore(p);
+            }
+            if accept {
+                a.accept_dialog();
+            }
             if let Some(p) = help {
                 a.help_at(p);
             }
