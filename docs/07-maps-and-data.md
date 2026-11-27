@@ -17,4 +17,4 @@ The environment variables `COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them
 
 ## If it won't start
 
-Set `COVERANT_RENDERER=glow` to use plain OpenGL if the graphics driver won't run the default renderer. On Linux, egui needs `libxkbcommon-x11-0` and `libgl1`.
+On Windows Coverant draws with DirectX 12; if the graphics driver crashes it while starting, the next start uses plain OpenGL on its own. Set `COVERANT_RENDERER=glow` to always use OpenGL, or `COVERANT_RENDERER=wgpu` to try the default again. Start-up failures and crashes are written to `startup-error.txt` in the cache folder; send that file with a report. On Linux, egui needs `libxkbcommon-x11-0` and `libgl1`.
