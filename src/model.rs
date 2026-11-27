@@ -535,6 +535,22 @@ pub const GROUNDS: &[(&str, f64, f64)] = &[
     ("Sea water", 81.0, 5.0),
 ];
 
+/// The Horizon tab's choices.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HorizonSettings {
+    pub height_m: f64,
+    pub target_m: f64,
+    /// 0 = the site's default radius
+    pub radius_km: f64,
+}
+
+impl Default for HorizonSettings {
+    fn default() -> Self {
+        HorizonSettings { height_m: 10.0, target_m: 1.5, radius_km: 0.0 }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -549,6 +565,7 @@ pub struct Settings {
     pub grey_map: bool,
     /// draw every ticked plot at once rather than just the selected one
     pub show_all_plots: bool,
+    pub horizon: HorizonSettings,
     /// map view at exit: lat, lon, zoom
     pub view: Option<(f64, f64, f64)>,
     /// site ids whose coverage is hidden
@@ -571,6 +588,7 @@ impl Default for Settings {
             basemap: 0,
             grey_map: true,
             show_all_plots: false,
+            horizon: HorizonSettings::default(),
             view: None,
             hidden: vec![],
             version: SETTINGS_VERSION,

@@ -4,6 +4,7 @@
 use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
 use crate::itm::{self, CLIMATES};
+use crate::horizon;
 use crate::link;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
 use crate::model::{self, AntennaDef, Library, LinkDef, LinkEnd, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS, SURROUNDINGS};
@@ -32,7 +33,7 @@ impl Tab {
             Tab::Antenna => "Antenna library",
             Tab::Coverage => "Coverage",
             Tab::Links => "Links between sites",
-            Tab::Horizon => "Radio horizon (next)",
+            Tab::Horizon => "Radio horizon",
         }
     }
     fn short(self) -> &'static str {
@@ -77,6 +78,19 @@ struct Job {
     progress: Arc<Progress>,
     rx: Rx<Result<Coverage, String>>,
     started: std::time::Instant,
+}
+
+struct HzJob {
+    site_id: String,
+    fp: String,
+    progress: Arc<Progress>,
+    rx: Rx<Result<horizon::Horizon, String>>,
+}
+
+struct HzResult {
+    fp: String,
+    h: horizon::Horizon,
+    tex: Option<egui::TextureHandle>,
 }
 
 struct RunInputs {
@@ -125,8 +139,12 @@ pub struct App {
     results: HashMap<String, Plot>,
     /// map size last frame, to fit a finished plot
     map_size: Vec2,
+    pending_fit: Option<(f64, f64, f64)>,
     sel_link: Option<usize>,
     confirm_delete_link: bool,
+    hz_job: Option<HzJob>,
+    /// worked-out horizons by site id
+    hz_results: HashMap<String, HzResult>,
     /// calculated links by id, with the inputs they were worked out from
     link_results: HashMap<String, (String, Result<link::LinkResult, String>)>,
     link_job: Option<(String, String, Rx<Result<link::LinkResult, String>>)>,
@@ -195,9 +213,12 @@ impl App {
             terrains: HashMap::new(),
             results,
             map_size: Vec2::new(900.0, 700.0),
+            pending_fit: None,
             stale: Default::default(),
             sel_link: if nl > 0 { Some(0) } else { None },
             confirm_delete_link: false,
+            hz_job: None,
+            hz_results: HashMap::new(),
             link_results: HashMap::new(),
             link_job: None,
             job: None,
@@ -732,6 +753,159 @@ impl App {
         profile_chart(ui, r, &na, &nb);
     }
 
+    // ------------------------------------------------------------------ horizon
+
+    fn horizon_inputs(&self) -> Option<(horizon::Inputs, String)> {
+        let s = self.lib.sites.get(self.selected?)?.clone();
+        let hz = &self.settings.horizon;
+        let radius = if hz.radius_km > 0.0 { hz.radius_km } else { s.default_radius(self.settings.model.radius_km) };
+        let inp = horizon::Inputs { height_m: hz.height_m, target_m: hz.target_m, radius_km: radius, terrain_zoom: self.settings.model.terrain_zoom, site: s };
+        let fp = format!("{:?} {} {} {} {}", inp.site, inp.height_m, inp.target_m, inp.radius_km, inp.terrain_zoom);
+        Some((inp, fp))
+    }
+
+    fn start_horizon(&mut self) {
+        if self.hz_job.is_some() {
+            return;
+        }
+        let Some((inp, fp)) = self.horizon_inputs() else { return };
+        let terrain = self.terrain(inp.terrain_zoom);
+        let progress = Progress::new();
+        let p2 = progress.clone();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(horizon::compute(&inp, &terrain, &p2));
+        });
+        self.hz_job = Some(HzJob { site_id: self.lib.sites[self.selected.unwrap()].id.clone(), fp, progress, rx });
+    }
+
+    fn poll_horizon(&mut self, ctx: &egui::Context) {
+        if let Some(j) = &self.hz_job {
+            match j.rx.try_recv() {
+                Ok(Ok(h)) => {
+                    let (lat, lon, r) = (h.lat, h.lon, h.radius_m / 1000.0);
+                    self.hz_results.insert(j.site_id.clone(), HzResult { fp: j.fp.clone(), h, tex: None });
+                    self.hz_job = None;
+                    self.fit_plot(lat, lon, r);
+                }
+                Ok(Err(e)) => {
+                    if e != "Stopped" {
+                        self.error = Some(e);
+                    }
+                    self.hz_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(150)),
+                Err(_) => self.hz_job = None,
+            }
+            return;
+        }
+        // keep a worked-out horizon up to date with the heights and the site
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        if let (Some(si), Some((_, fp))) = (self.selected, self.horizon_inputs()) {
+            if self.hz_results.get(&self.lib.sites[si].id).is_some_and(|r| r.fp != fp) {
+                self.start_horizon();
+            }
+        }
+    }
+
+    fn horizon_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Radio horizon");
+        ui.label(RichText::new("How far a site sees: the skyline all round as seen from its antenna, and the ground where a receiver could see the antenna, over the curved earth (k = 4/3).").small().weak());
+        ui.add_space(4.0);
+        if self.lib.sites.is_empty() {
+            ui.label(RichText::new("Add a site first.").weak());
+            return;
+        }
+        let mut sel = self.selected.unwrap_or(0);
+        let busy = self.hz_job.is_some();
+        let mut calc = false;
+        card(ui, "From", |ui| {
+            egui::Grid::new("hz").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Site");
+                egui::ComboBox::from_id_salt("hz_site").selected_text(self.lib.sites[sel].name.clone()).width(220.0).show_ui(ui, |ui| {
+                    for (i, s) in self.lib.sites.iter().enumerate() {
+                        ui.selectable_value(&mut sel, i, &s.name);
+                    }
+                });
+                ui.end_row();
+                let hz = &mut self.settings.horizon;
+                ui.label("Antenna height");
+                ui.add(egui::DragValue::new(&mut hz.height_m).speed(0.25).range(0.5..=3000.0).suffix(" m above ground"));
+                ui.end_row();
+                ui.label("Receivers at");
+                ui.add(egui::DragValue::new(&mut hz.target_m).speed(0.1).range(0.0..=3000.0).suffix(" m above ground"))
+                    .on_hover_text("The ground counts as seeing the site where an antenna this high there has a clear line to it. 0 shows the bare ground.");
+                ui.end_row();
+                ui.label("Out to");
+                ui.horizontal(|ui| {
+                    let def = self.lib.sites[sel].default_radius(self.settings.model.radius_km);
+                    let mut r = if hz.radius_km > 0.0 { hz.radius_km } else { def };
+                    if ui.add(egui::DragValue::new(&mut r).speed(1.0).range(2.0..=250.0).suffix(" km")).changed() {
+                        hz.radius_km = r;
+                    }
+                    if hz.radius_km > 0.0 && ui.small_button("↺").on_hover_text(format!("Back to the site's default ({def:.0} km)")).clicked() {
+                        hz.radius_km = 0.0;
+                    }
+                });
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if let Some(j) = &self.hz_job {
+                    if ui.button("■ Stop").clicked() {
+                        j.progress.cancel.store(true, Ordering::Relaxed);
+                    }
+                    ui.add(egui::ProgressBar::new(j.progress.fraction()).text(j.progress.stage.get()).animate(true));
+                } else if ui.add_enabled(!busy, egui::Button::new(RichText::new("▶ Show horizon").color(Color32::WHITE).strong()).fill(crate::theme::ACCENT).min_size(Vec2::new(150.0, 30.0))).clicked() {
+                    calc = true;
+                }
+            });
+            ui.label(RichText::new("Once worked out, it follows changes to the heights, the distance and the site.").small().weak());
+        });
+        if Some(sel) != self.selected {
+            self.selected = Some(sel);
+            self.follow_site();
+        }
+        if calc {
+            self.start_horizon();
+        }
+        let sid = self.lib.sites[sel].id.clone();
+        if let Some(r) = self.hz_results.get(&sid) {
+            let h = &r.h;
+            let n = h.n_rad() as f64;
+            let mean_reach = h.reach.iter().sum::<f64>() / n / 1000.0;
+            let (imax, _) = h.angle.iter().enumerate().fold((0, f64::NEG_INFINITY), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
+            let (ifar, _) = h.reach.iter().enumerate().fold((0, f64::NEG_INFINITY), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
+            let deg = |i: usize| i as f64 * 360.0 / n;
+            card(ui, "Horizon", |ui| {
+                egui::Grid::new("hzres").num_columns(2).spacing([10.0, 3.0]).striped(true).show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                        ui.label(RichText::new(k).weak());
+                        ui.label(RichText::new(v).monospace());
+                        ui.end_row();
+                    };
+                    row(ui, "Antenna", format!("{:.0} m ground + {:.1} m = {:.0} m", h.ground_m, h.height_m, h.ground_m + h.height_m));
+                    row(ui, "Smooth earth", format!("{:.1} km, dip {:.2}°", h.smooth_dist_m / 1000.0, h.smooth_angle));
+                    row(ui, "Seen ground", format!("{:.0} km² (yellow)", h.visible_km2));
+                    row(ui, "Average reach", format!("{mean_reach:.1} km"));
+                    row(ui, "Furthest", format!("{:.1} km at {:.0}°", h.reach[ifar] / 1000.0, deg(ifar)));
+                    row(ui, "Highest skyline", format!("{:+.2}° at {:.0}°, {:.1} km off", h.angle[imax], deg(imax), h.dist[imax] / 1000.0));
+                });
+                ui.label(RichText::new("Yellow is ground from which a receiver at the height above can see the antenna; the orange line is how far that reaches on each bearing. The panorama below is the skyline all round.").small().weak());
+            });
+        }
+    }
+
+    fn horizon_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(si) = self.selected else { return };
+        let s = &self.lib.sites[si];
+        if let Some(r) = self.hz_results.get(&s.id) {
+            panorama_chart(ui, &r.h, &s.name);
+        }
+    }
+
     // ------------------------------------------------------------------ plots
 
     /// A new plot: a copy of plot `from`, else the selected site with the selected antenna.
@@ -892,7 +1066,13 @@ impl App {
     }
 
     /// Centre the map on a plot and zoom so all of it shows.
+    /// Centre the map on a circle and zoom so all of it shows, once the map's size for the
+    /// next frame is known (a panel may be opening under it).
     fn fit_plot(&mut self, lat: f64, lon: f64, radius_km: f64) {
+        self.pending_fit = Some((lat, lon, radius_km));
+    }
+
+    fn apply_fit(&mut self, lat: f64, lon: f64, radius_km: f64) {
         let px = (self.map_size.x.min(self.map_size.y) as f64 - 60.0).max(200.0);
         let mpp = 2.0 * radius_km * 1000.0 / px;
         let world = 2.0 * std::f64::consts::PI * terrain::EARTH_R * lat.to_radians().cos();
@@ -1771,17 +1951,6 @@ impl App {
         }
     }
 
-    fn later_tab(&mut self, ui: &mut egui::Ui, what: Tab) {
-        ui.heading(what.label().trim_end_matches(" (next)"));
-        ui.add_space(6.0);
-        card(ui, "Coming next", |ui| {
-            match what {
-                Tab::Links => ui.label("Path profiles between two or more sites: the terrain between them, the Fresnel zone, and the predicted signal and margin, from the same terrain and Longley-Rice engine as the coverage plots."),
-                _ => ui.label("The radio horizon from a site: how far it sees on each bearing, drawn on the map."),
-            };
-        });
-    }
-
     // ------------------------------------------------------------------ map
 
     fn map_panel(&mut self, ui: &mut egui::Ui) {
@@ -1789,6 +1958,10 @@ impl App {
         // starting a drag on the selected pin moves the pin, not the map
         let pointer = ctx.input(|i| i.pointer.interact_pos());
         let pressed = ctx.input(|i| i.pointer.primary_pressed());
+        self.map_size = ui.available_size();
+        if let Some((lat, lon, r)) = self.pending_fit.take() {
+            self.apply_fit(lat, lon, r);
+        }
         let (resp, proj) = map::show(ui, &mut self.view, &mut self.tiles, self.settings.basemap, self.settings.grey_map, !self.dragging_pin);
         let painter = ui.painter_at(proj.rect);
 
@@ -1810,6 +1983,30 @@ impl App {
             });
             let r = proj.global_rect(m.img_x0, m.img_y0, m.img_x0 + m.img_w as f64, m.img_y0 + m.img_h as f64, m.img_zoom);
             painter.image(tex.id(), r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), tint);
+        }
+
+        // the horizon of the selected site
+        if self.tab == Tab::Horizon {
+            if let Some(si) = self.selected {
+                if let Some(r) = self.hz_results.get_mut(&self.lib.sites[si].id) {
+                    let h = &r.h;
+                    let tex = r.tex.get_or_insert_with(|| {
+                        let img = egui::ColorImage::from_rgba_unmultiplied([h.image.width() as usize, h.image.height() as usize], h.image.as_raw());
+                        ctx.load_texture("horizon", img, egui::TextureOptions::NEAREST)
+                    });
+                    let rr = proj.global_rect(h.img_x0, h.img_y0, h.img_x0 + h.image.width() as f64, h.img_y0 + h.image.height() as f64, h.img_zoom);
+                    painter.image(tex.id(), rr, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::from_white_alpha((self.settings.opacity * 255.0) as u8));
+                    let n = h.n_rad();
+                    let pts: Vec<egui::Pos2> = (0..=n)
+                        .map(|i| {
+                            let i = i % n;
+                            let (la, lo) = terrain::destination(h.lat, h.lon, i as f64 * 360.0 / n as f64, h.reach[i].max(h.step_m));
+                            proj.to_screen(la, lo)
+                        })
+                        .collect();
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, Color32::from_rgb(234, 88, 12))));
+                }
+            }
         }
 
         // links: the selected one bold, the others faint
@@ -1996,7 +2193,7 @@ impl App {
         ctx.request_repaint();
         if shot.done.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if self.frame >= 90 && !shot.requested && self.job.is_none() && self.link_job.is_none() {
+        } else if self.frame >= 90 && !shot.requested && self.job.is_none() && self.link_job.is_none() && self.hz_job.is_none() {
             shot.requested = true;
             let path = shot.path.clone();
             let done = shot.done.clone();
@@ -2014,6 +2211,11 @@ impl App {
                 c2.request_repaint();
             });
         }
+    }
+
+    /// For automated tests: work out the selected site's horizon.
+    pub fn horizon_on_start(&mut self) {
+        self.start_horizon();
     }
 
     /// For automated tests: choose a link and calculate it.
@@ -2057,6 +2259,7 @@ impl eframe::App for App {
         self.poll();
         self.sync_results(&ctx);
         self.poll_link(&ctx);
+        self.poll_horizon(&ctx);
         while let Ok(n) = self.notes_rx.try_recv() {
             self.status = n;
             if !self.status.starts_with("Removed") {
@@ -2114,13 +2317,17 @@ impl eframe::App for App {
                     Tab::Antenna => self.antenna_tab(ui),
                     Tab::Coverage => self.coverage_tab(ui),
                     Tab::Links => self.links_tab(ui),
-                    t => self.later_tab(ui, t),
+                    Tab::Horizon => self.horizon_tab(ui),
                 }
                 ui.add_space(10.0);
             });
         });
         let has_profile = self.tab == Tab::Links
             && self.sel_link.is_some_and(|i| matches!(self.link_results.get(&self.lib.links[i].id), Some((_, Ok(_)))));
+        let has_panorama = self.tab == Tab::Horizon && self.selected.is_some_and(|i| self.hz_results.contains_key(&self.lib.sites[i].id));
+        if has_panorama {
+            egui::Panel::bottom("panorama").resizable(true).default_size(260.0).size_range(160.0..=600.0).frame(egui::Frame::NONE).show(ui, |ui| self.horizon_panel(ui));
+        }
         if has_profile {
             egui::Panel::bottom("profile").resizable(true).default_size(320.0).size_range(180.0..=700.0).frame(egui::Frame::NONE).show(ui, |ui| self.profile_panel(ui));
         }
@@ -2519,4 +2726,96 @@ fn nice_step(span: f64, count: f64) -> f64 {
     let raw = (span / count).max(1e-6);
     let p = 10f64.powf(raw.log10().floor());
     [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * p).find(|s| *s >= raw).unwrap_or(10.0 * p)
+}
+
+/// The skyline all round a site: elevation of the horizon against bearing.
+fn panorama_chart(ui: &mut egui::Ui, h: &horizon::Horizon, name: &str) {
+    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+    let frame = ui.painter_at(rect);
+    let v = ui.visuals();
+    frame.rect_filled(rect, 0.0, v.extreme_bg_color);
+    let n = h.n_rad();
+    let mut lo = h.angle.iter().cloned().fold(f64::INFINITY, f64::min).min(h.smooth_angle);
+    let mut hi = h.angle.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(0.0);
+    let pad = ((hi - lo) * 0.12).max(0.05);
+    lo -= pad;
+    hi += pad;
+    let plot = egui::Rect::from_min_max(rect.min + Vec2::new(56.0, 26.0), rect.max - Vec2::new(16.0, 30.0));
+    let px = |b: f64| plot.left() + (b / 360.0) as f32 * plot.width();
+    let py = |a: f64| plot.bottom() - ((a - lo) / (hi - lo)) as f32 * plot.height();
+    let weak = v.weak_text_color();
+    let ink = crate::theme::ink();
+    let font = egui::FontId::proportional(11.0);
+    let grid = egui::Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color.gamma_multiply(0.5));
+    let step = nice_step(hi - lo, 5.0);
+    let mut a = (lo / step).ceil() * step;
+    while a <= hi {
+        frame.line_segment([egui::pos2(plot.left(), py(a)), egui::pos2(plot.right(), py(a))], grid);
+        frame.text(egui::pos2(plot.left() - 6.0, py(a)), egui::Align2::RIGHT_CENTER, format!("{:+.*}°", if step < 0.1 { 2 } else { 1 }, a + 0.0), font.clone(), weak);
+        a += step;
+    }
+    for (b, l) in [(0.0, "N"), (45.0, "NE"), (90.0, "E"), (135.0, "SE"), (180.0, "S"), (225.0, "SW"), (270.0, "W"), (315.0, "NW"), (360.0, "N")] {
+        frame.line_segment([egui::pos2(px(b), plot.top()), egui::pos2(px(b), plot.bottom())], grid);
+        frame.text(egui::pos2(px(b), plot.bottom() + 4.0), egui::Align2::CENTER_TOP, l, font.clone(), if l.len() == 1 { ink } else { weak });
+    }
+    let painter = ui.painter_at(plot);
+    // the skyline, filled below
+    let terr = Color32::from_rgb(160, 120, 80);
+    let mut mesh = egui::Mesh::default();
+    let fill = terr.gamma_multiply(0.55);
+    for i in 0..=n {
+        let b = i as f64 * 360.0 / n as f64;
+        let top = egui::pos2(px(b), py(h.angle[i % n]));
+        mesh.colored_vertex(top, fill);
+        mesh.colored_vertex(egui::pos2(top.x, plot.bottom()), fill);
+        let k = mesh.vertices.len() as u32;
+        if k >= 4 {
+            mesh.add_triangle(k - 4, k - 3, k - 2);
+            mesh.add_triangle(k - 3, k - 1, k - 2);
+        }
+    }
+    painter.add(mesh);
+    let line: Vec<egui::Pos2> = (0..=n).map(|i| egui::pos2(px(i as f64 * 360.0 / n as f64), py(h.angle[i % n]))).collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, terr)));
+    // level and the smooth-earth horizon
+    painter.line_segment([egui::pos2(plot.left(), py(0.0)), egui::pos2(plot.right(), py(0.0))], egui::Stroke::new(1.0, ink.gamma_multiply(0.6)));
+    let se = [egui::pos2(plot.left(), py(h.smooth_angle)), egui::pos2(plot.right(), py(h.smooth_angle))];
+    painter.add(egui::Shape::dashed_line(&se, egui::Stroke::new(1.5, Color32::from_rgb(120, 170, 255)), 6.0, 4.0));
+    frame.text(
+        rect.left_top() + Vec2::new(12.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "Skyline from {name} ({:.0} m antenna) · ━ level · ┅ smooth-earth horizon {:.2}° at {:.1} km · k = 4/3",
+            h.height_m,
+            h.smooth_angle,
+            h.smooth_dist_m / 1000.0
+        ),
+        font.clone(),
+        weak,
+    );
+    if let Some(pos) = resp.hover_pos() {
+        if plot.contains(pos) {
+            let b = ((pos.x - plot.left()) / plot.width()) as f64 * 360.0;
+            let i = h.at(b);
+            frame.line_segment([egui::pos2(pos.x, plot.top()), egui::pos2(pos.x, plot.bottom())], egui::Stroke::new(1.0, weak));
+            let t = format!(
+                "bearing {:.1}°\nskyline {:+.2}°, {:.1} km away, ground {:.0} m\nreceivers see the site out to {:.1} km",
+                i as f64 * 360.0 / n as f64,
+                h.angle[i],
+                h.dist[i] / 1000.0,
+                h.sky_ground[i],
+                h.reach[i] / 1000.0
+            );
+            let g = frame.layout_no_wrap(t, font.clone(), ink);
+            let mut at = pos + Vec2::new(12.0, 12.0);
+            if at.x + g.size().x + 12.0 > rect.right() {
+                at.x = pos.x - g.size().x - 20.0;
+            }
+            if at.y + g.size().y + 10.0 > rect.bottom() {
+                at.y = pos.y - g.size().y - 16.0;
+            }
+            frame.rect_filled(egui::Rect::from_min_size(at, g.size() + Vec2::new(10.0, 8.0)), 5.0, crate::theme::label_bg());
+            frame.galley(at + Vec2::new(5.0, 4.0), g, ink);
+        }
+    }
 }

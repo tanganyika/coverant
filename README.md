@@ -49,7 +49,11 @@ processor core.
   each end. Hover over the profile for heights and clearance at any point. A calculated
   link updates as you change it.
 
-**Coming next:** the radio horizon from a site (the *Horizon* tab).
+- **Radio horizon.** Choose a site, its antenna height and the height of the receivers.
+  The map shades the ground from which a receiver could see the antenna (over the curved
+  earth, k = 4/3) and draws how far that reaches on each bearing. A 360° panorama under the
+  map shows the skyline as seen from the antenna against the smooth-earth horizon; hover
+  for the bearing, angle and distance.
 
 ## Installing
 
@@ -58,7 +62,7 @@ Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubu
 (Apple Silicon) tarball. For the package:
 
 ```
-sudo apt install ./coverant_0.2.0-1_amd64.deb
+sudo apt install ./coverant_0.3.0-1_amd64.deb
 ```
 
 It adds Coverant to the applications menu (under Ham Radio / Science).
