@@ -4,6 +4,7 @@
 use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
 use crate::itm::{self, CLIMATES};
+use crate::help;
 use crate::horizon;
 use crate::link;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
@@ -143,6 +144,8 @@ pub struct App {
     sel_link: Option<usize>,
     confirm_delete_link: bool,
     hz_job: Option<HzJob>,
+    /// the user guide page on show
+    help: Option<usize>,
     /// worked-out horizons by site id
     hz_results: HashMap<String, HzResult>,
     /// calculated links by id, with the inputs they were worked out from
@@ -218,6 +221,7 @@ impl App {
             sel_link: if nl > 0 { Some(0) } else { None },
             confirm_delete_link: false,
             hz_job: None,
+            help: None,
             hz_results: HashMap::new(),
             link_results: HashMap::new(),
             link_job: None,
@@ -554,6 +558,7 @@ impl App {
     fn links_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Links");
+            self.help_button(ui, "Links");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("＋ New link").color(Color32::WHITE)).fill(crate::theme::ACCENT)).clicked() {
                     self.new_link(None);
@@ -811,7 +816,10 @@ impl App {
     }
 
     fn horizon_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Radio horizon");
+        ui.horizontal(|ui| {
+            ui.heading("Radio horizon");
+            self.help_button(ui, "Horizon");
+        });
         ui.label(RichText::new("How far a site sees: the skyline all round as seen from its antenna, and the ground where a receiver could see the antenna, over the curved earth (k = 4/3).").small().weak());
         ui.add_space(4.0);
         if self.lib.sites.is_empty() {
@@ -1181,6 +1189,15 @@ impl App {
                 }
             });
             ui.menu_button("Help", |ui| {
+                if ui.add(egui::Button::new("User guide").shortcut_text("F1")).clicked() {
+                    self.help = Some(help::page_for(self.tab.short()));
+                    ui.close();
+                }
+                if ui.button("Getting started").clicked() {
+                    self.help = Some(0);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("About Coverant").clicked() {
                     self.show_about = true;
                     ui.close();
@@ -1238,6 +1255,7 @@ impl App {
     fn sites_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Sites");
+            self.help_button(ui, "Sites");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("＋ New site").color(Color32::WHITE)).fill(crate::theme::ACCENT)).on_hover_text("Then click the map, or type the location below").clicked() {
                     self.new_site(self.view.lat, self.view.lon, true);
@@ -1418,6 +1436,7 @@ impl App {
     fn antenna_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Antennas");
+            self.help_button(ui, "Antennas");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("＋ New antenna").color(Color32::WHITE)).fill(crate::theme::ACCENT)).clicked() {
                     self.new_antenna(None);
@@ -1546,6 +1565,7 @@ impl App {
     fn coverage_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Coverage plots");
+            self.help_button(ui, "Coverage");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("＋ New plot").color(Color32::WHITE)).fill(crate::theme::ACCENT)).on_hover_text("The selected site with the selected antenna").clicked() {
                     self.new_plot(None);
@@ -2213,6 +2233,18 @@ impl App {
         }
     }
 
+    /// A small "?" that opens the guide at this tab's page.
+    fn help_button(&mut self, ui: &mut egui::Ui, tab: &str) {
+        if ui.small_button("?").on_hover_text("How this tab works (F1)").clicked() {
+            self.help = Some(help::page_for(tab));
+        }
+    }
+
+    /// For automated tests: open the guide at a page.
+    pub fn help_at(&mut self, page: usize) {
+        self.help = Some(page.min(help::PAGES.len() - 1));
+    }
+
     /// For automated tests: work out the selected site's horizon.
     pub fn horizon_on_start(&mut self) {
         self.start_horizon();
@@ -2333,6 +2365,13 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.map_panel(ui));
         self.about(&ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.help = match self.help {
+                Some(_) => None,
+                None => Some(help::page_for(self.tab.short())),
+            };
+        }
+        help::window(&ctx, &mut self.help);
         if self.ask_quit {
             egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(&ctx, |ui| {
                 ui.label("Your sites have changes that haven't been saved.");

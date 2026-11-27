@@ -55,6 +55,11 @@ processor core.
   map shows the skyline as seen from the antenna against the smooth-earth horizon; hover
   for the bearing, angle and distance.
 
+## User guide
+
+The app has a built-in guide: press F1, choose Help → User guide, or click the ? next to any
+tab heading. The same pages are in [docs/](docs/01-getting-started.md) here on GitHub.
+
 ## Installing
 
 Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubuntu package
@@ -62,7 +67,7 @@ Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubu
 (Apple Silicon) tarball. For the package:
 
 ```
-sudo apt install ./coverant_0.3.0-1_amd64.deb
+sudo apt install ./coverant_0.3.1-1_amd64.deb
 ```
 
 It adds Coverant to the applications menu (under Ham Radio / Science).

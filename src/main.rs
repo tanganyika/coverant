@@ -4,6 +4,7 @@
 mod app;
 mod coords;
 mod coverage;
+mod help;
 mod itm;
 mod horizon;
 mod link;
@@ -32,12 +33,14 @@ fn main() -> eframe::Result<()> {
     let mut select: Option<usize> = None;
     let mut link: Option<usize> = None;
     let mut hz = false;
+    let mut help: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => shot = args.next().map(PathBuf::from),
             "--tab" => tab = args.next().and_then(|t| app::Tab::from_name(&t)),
             "--plot" => plot = true,
             "--horizon" => hz = true,
+            "--help-page" => help = args.next().and_then(|v| v.parse().ok()),
             "--link" => link = args.next().and_then(|v| v.parse().ok()),
             "--select" => select = args.next().and_then(|v| v.parse().ok()),
             "--save" => save = true,
@@ -65,6 +68,9 @@ fn main() -> eframe::Result<()> {
         options.clone(),
         Box::new(move |cc| {
             let mut a = app::App::new(cc, tab, shot.clone());
+            if let Some(p) = help {
+                a.help_at(p);
+            }
             if hz {
                 a.horizon_on_start();
             }
