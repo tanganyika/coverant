@@ -1,5 +1,6 @@
 # Tests and builds Coverant for Linux, Windows and macOS on every push and pull request.
-# The programs are attached to each run (Actions tab -> the run -> Artifacts); a version tag
+# The programs are attached to each run (Linux .deb and .tar.gz, Windows installer and .zip,
+# macOS .tar.gz; Actions tab -> the run -> Artifacts); a version tag
 # (v0.1.0 or 0.1.0) also makes a GitHub release with them. To attach the programs to a release
 # that already exists, run this workflow by hand with its tag. Releases also update the APT
 # repository on GitHub Pages (needs the APT_GPG_PRIVATE_KEY secret).
@@ -36,18 +37,41 @@ jobs:
             name: macos-arm64
             bin: coverant
     runs-on: ${{ matrix.os }}
+    env:
+      # link the C runtime into the program, so it starts on PCs without the
+      # Visual C++ Redistributable (VCRUNTIME140.dll)
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release
       - run: cargo build --release
+      - name: Check it needs no Visual C++ runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if objdump -p target/release/coverant.exe | grep -iE 'DLL Name: (vcruntime|msvcp|api-ms-win-crt)'; then
+            echo "::error::coverant.exe needs the Visual C++ runtime"; exit 1
+          fi
       - name: Debian package
         if: runner.os == 'Linux'
         run: |
           cargo install cargo-deb --locked
           cargo deb --no-build
           mkdir -p dist && cp target/debian/*.deb dist/
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VER=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          ISCC=$(ls "/c/Program Files (x86)"/Inno\ Setup\ */ISCC.exe "/c/Program Files"/Inno\ Setup\ */ISCC.exe 2>/dev/null | tail -1 || true)
+          if [ -z "$ISCC" ]; then
+            choco install innosetup -y --no-progress
+            ISCC=$(ls "/c/Program Files (x86)"/Inno\ Setup\ */ISCC.exe "/c/Program Files"/Inno\ Setup\ */ISCC.exe | tail -1)
+          fi
+          "$ISCC" //Q //DVersion=$VER packaging/windows/coverant.iss
+          ls -l dist
       - name: Package
         shell: bash
         run: |

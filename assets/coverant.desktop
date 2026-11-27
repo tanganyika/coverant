@@ -6,6 +6,6 @@ Comment=Plan radio sites and plot Longley-Rice coverage over real terrain
 Exec=coverant
 Icon=coverant
 Terminal=false
-Categories=HamRadio;Science;Education;
+Categories=HamRadio;Science;
 Keywords=radio;coverage;antenna;amateur;ham;propagation;
 StartupWMClass=coverant

@@ -67,7 +67,8 @@ tab heading. The same pages are in [docs/](docs/01-getting-started.md) here on G
 ## Installing
 
 Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubuntu package,
-a Linux tarball, a Windows zip and a macOS (Apple Silicon) tarball.
+a Linux tarball, a Windows installer, a portable Windows zip and a macOS (Apple Silicon)
+tarball.
 
 ### Linux: the APT repository
 
@@ -89,8 +90,17 @@ On other distributions, unpack `coverant-linux-x86_64.tar.gz` and run `./coveran
 
 ### Windows 10 or 11
 
-Unzip `coverant-windows-x86_64.zip` anywhere and run `coverant.exe`. It isn't code-signed,
-so the first time Windows may say it protected your PC: choose **More info → Run anyway**.
+Download `coverant-<version>-windows-x86_64-setup.exe` and run it. It installs for your
+user only, so it needs no administrator rights (or choose to install for everyone), and adds
+Coverant to the Start menu, with a desktop shortcut if you tick it. Running a newer installer
+upgrades it in place. Remove it from **Settings → Apps**; your sites, plots and downloaded
+terrain stay behind in `%APPDATA%\coverant` and `%LOCALAPPDATA%\coverant`.
+
+Neither the installer nor the program is code-signed, so the first time Windows may say it
+protected your PC: choose **More info → Run anyway**.
+
+To run Coverant without installing it, unzip `coverant-windows-x86_64.zip` anywhere and run
+`coverant.exe`.
 
 ### macOS (Apple Silicon)
 
@@ -117,7 +127,8 @@ The first build takes a few minutes. The program is then
 `target/release/coverant` (`coverant.exe` on Windows), which can be copied anywhere.
 On Linux, egui needs the usual X11/Wayland libraries (on Debian/Ubuntu:
 `sudo apt install libxkbcommon-x11-0 libgl1`). `cargo install cargo-deb && cargo deb`
-builds the .deb in `target/debian/`.
+builds the .deb in `target/debian/`. On Windows, with [Inno Setup](https://jrsoftware.org/isinfo.php)
+installed, `iscc /DVersion=0.4.0 packaging\windows\coverant.iss` builds the installer in `dist\`.
 
 Pushing to GitHub builds Windows, macOS and Linux programs with GitHub Actions
 (`.github/workflows/build.yml`); a `v*` tag makes a release with them.
@@ -146,8 +157,10 @@ offline.
 | Terrain and map tiles | `~/.cache/coverant`, `%LOCALAPPDATA%\coverant`, `~/Library/Caches/coverant` |
 
 `COVERANT_DATA_DIR` and `COVERANT_CACHE_DIR` move them. File → Open data folder opens
-the first. Set `COVERANT_RENDERER=glow` to use plain OpenGL if the default renderer won't
-start (it falls back on its own too). On Linux the file windows use the desktop portal
+the first. On Windows Coverant draws with DirectX 12. If the
+graphics driver crashes it while starting, the next start uses plain OpenGL on its own;
+`COVERANT_RENDERER=glow` always uses OpenGL and `COVERANT_RENDERER=wgpu` tries the default
+again. Start-up failures and crashes are written to `startup-error.txt` in the cache folder. On Linux the file windows use the desktop portal
 (`xdg-desktop-portal`), which most desktops already have.
 
 ## Code

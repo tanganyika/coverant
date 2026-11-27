@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Windows start-up fixes.** Coverant uses DirectX 12 on Windows rather than letting wgpu
+  pick Vulkan, which old Intel drivers crash on. If the graphics driver still crashes it
+  while starting, the next start uses OpenGL on its own. The program now links the C runtime
+  in, so it starts without the Visual C++ Redistributable.
+- **Windows installer** (`coverant-<version>-windows-x86_64-setup.exe`): installs per user
+  without administrator rights (or for everyone), adds a Start menu entry and optional desktop
+  shortcut, upgrades in place, and uninstalls from Settings → Apps. The program carries its
+  icon in Explorer and the taskbar. The portable .zip is still there.
+- The Linux menu entry no longer appears twice on desktops that file it under both Science
+  and Education.
+- Start-up failures and crashes are shown in a message box and written to
+  `startup-error.txt` in the cache folder.
+
 ## 0.4.0 (2026-11-27)
 
 - **Backup and restore.** File → Back up everything writes sites, antennas, plots, links and
