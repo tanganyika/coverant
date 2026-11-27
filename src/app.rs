@@ -3,9 +3,10 @@
 
 use crate::coords;
 use crate::coverage::{self, Coverage, Progress};
-use crate::itm::CLIMATES;
+use crate::itm::{self, CLIMATES};
+use crate::link;
 use crate::map::{self, Projection, Tiles, View, BASEMAPS};
-use crate::model::{self, AntennaDef, Library, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS, SURROUNDINGS};
+use crate::model::{self, AntennaDef, Library, LinkDef, LinkEnd, PlotDef, Receiver, Settings, Site, GROUNDS, MODES, PRESETS, SURROUNDINGS};
 use crate::terrain::{self, Terrain};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ impl Tab {
             Tab::Sites => "Sites",
             Tab::Antenna => "Antenna library",
             Tab::Coverage => "Coverage",
-            Tab::Links => "Links between sites (next)",
+            Tab::Links => "Links between sites",
             Tab::Horizon => "Radio horizon (next)",
         }
     }
@@ -124,6 +125,11 @@ pub struct App {
     results: HashMap<String, Plot>,
     /// map size last frame, to fit a finished plot
     map_size: Vec2,
+    sel_link: Option<usize>,
+    confirm_delete_link: bool,
+    /// calculated links by id, with the inputs they were worked out from
+    link_results: HashMap<String, (String, Result<link::LinkResult, String>)>,
+    link_job: Option<(String, String, Rx<Result<link::LinkResult, String>>)>,
     /// plots whose site, antenna or model changed since they ran
     stale: std::collections::HashSet<String>,
     job: Option<Job>,
@@ -173,7 +179,7 @@ impl App {
         let (notes_tx, notes_rx) = channel();
         let threads = rayon::current_num_threads();
         let n = sites.len();
-        let (na, np) = (lib.antennas.len(), lib.plots.len());
+        let (na, np, nl) = (lib.antennas.len(), lib.plots.len(), lib.links.len());
         App {
             saved: lib.clone(),
             lib,
@@ -190,6 +196,10 @@ impl App {
             results,
             map_size: Vec2::new(900.0, 700.0),
             stale: Default::default(),
+            sel_link: if nl > 0 { Some(0) } else { None },
+            confirm_delete_link: false,
+            link_results: HashMap::new(),
+            link_job: None,
             job: None,
             status: if n == 0 {
                 "Ready. Press “New site”, or right-click the map where your site is.".into()
@@ -373,6 +383,10 @@ impl App {
             for id in &ids {
                 self.delete_plot(id);
             }
+            let links: Vec<String> = self.lib.links.iter().filter(|l| l.a.site_id == s.id || l.b.site_id == s.id).map(|l| l.id.clone()).collect();
+            for id in &links {
+                self.delete_link(id);
+            }
             self.lib.sites.remove(i);
             self.saved.sites.retain(|x| x.id != s.id);
             self.write_saved();
@@ -416,6 +430,306 @@ impl App {
         let n = self.lib.antennas.len();
         self.sel_ant = if n == 0 { None } else { Some(i.min(n - 1)) };
         self.status = format!("Deleted the antenna {}.", a.name);
+    }
+
+    // ------------------------------------------------------------------ links
+
+    fn new_link(&mut self, from: Option<usize>) {
+        let l = match from {
+            Some(i) => LinkDef { id: model::new_id(), name: format!("{} (copy)", self.lib.links[i].name), ..self.lib.links[i].clone() },
+            None => {
+                if self.lib.sites.len() < 2 {
+                    self.status = "A link needs two sites: add another site first.".into();
+                    return;
+                }
+                if self.lib.antennas.is_empty() {
+                    self.new_antenna(None);
+                }
+                let ia = self.selected.unwrap_or(0);
+                let ib = if ia == 0 { 1 } else { 0 };
+                let ant = self.lib.antennas[self.sel_ant.unwrap_or(0)].id.clone();
+                let (sa, sb) = (&self.lib.sites[ia], &self.lib.sites[ib]);
+                LinkDef {
+                    id: model::new_id(),
+                    name: format!("{} ↔ {}", sa.name, sb.name),
+                    a: LinkEnd { site_id: sa.id.clone(), antenna_id: ant.clone(), ..Default::default() },
+                    b: LinkEnd { site_id: sb.id.clone(), antenna_id: ant, ..Default::default() },
+                    ..Default::default()
+                }
+            }
+        };
+        self.lib.links.push(l);
+        self.sel_link = Some(self.lib.links.len() - 1);
+        self.confirm_delete_link = false;
+    }
+
+    fn delete_link(&mut self, id: &str) {
+        self.lib.links.retain(|l| l.id != id);
+        self.saved.links.retain(|l| l.id != id);
+        self.link_results.remove(id);
+        let n = self.lib.links.len();
+        self.sel_link = if n == 0 { None } else { Some(self.sel_link.unwrap_or(0).min(n - 1)) };
+    }
+
+    /// Both ends of link `i` as the calculation wants them, and a fingerprint of everything it uses.
+    fn link_inputs(&self, i: usize) -> Option<(link::End, link::End, model::ModelSettings, String)> {
+        let l = &self.lib.links[i];
+        let end = |e: &LinkEnd| -> Option<link::End> {
+            let site = self.lib.site(&e.site_id)?.clone();
+            let ant = self.lib.antenna(&e.antenna_id)?;
+            Some(link::End { site, st: l.station(e, ant), required_dbm: l.required_dbm() })
+        };
+        let (a, b) = (end(&l.a)?, end(&l.b)?);
+        let m = self.settings.model.clone();
+        let fp = format!("{l:?} {:?} {:?} {:?} {:?} {m:?}", a.site, b.site, self.lib.antenna(&l.a.antenna_id), self.lib.antenna(&l.b.antenna_id));
+        Some((a, b, m, fp))
+    }
+
+    fn start_link(&mut self, i: usize) {
+        if self.link_job.is_some() {
+            return;
+        }
+        let Some((a, b, m, fp)) = self.link_inputs(i) else {
+            self.status = "Choose a site and an antenna for both ends first.".into();
+            return;
+        };
+        let terrain = self.terrain(m.terrain_zoom);
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(link::compute(&a, &b, &m, &terrain));
+        });
+        self.link_job = Some((self.lib.links[i].id.clone(), fp, rx));
+    }
+
+    fn poll_link(&mut self, ctx: &egui::Context) {
+        if let Some((id, fp, rx)) = &self.link_job {
+            match rx.try_recv() {
+                Ok(r) => {
+                    if let Err(e) = &r {
+                        self.status = format!("Link: {e}");
+                    }
+                    self.link_results.insert(id.clone(), (fp.clone(), r));
+                    self.link_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+                Err(_) => self.link_job = None,
+            }
+            return;
+        }
+        // keep a calculated link up to date as it is edited
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        if let Some(i) = self.sel_link {
+            let id = &self.lib.links[i].id;
+            if let (Some((old, _)), Some((_, _, _, fp))) = (self.link_results.get(id), self.link_inputs(i)) {
+                if *old != fp {
+                    self.start_link(i);
+                }
+            }
+        }
+    }
+
+    fn links_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Links");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("＋ New link").color(Color32::WHITE)).fill(crate::theme::ACCENT)).clicked() {
+                    self.new_link(None);
+                }
+            });
+        });
+        if self.lib.links.is_empty() {
+            ui.label(RichText::new("No links yet. A link joins two of your sites, each with one of your antennas, and shows the terrain, line of sight and signal between them. Press “New link”.").weak());
+        }
+        let mut select = None;
+        for (i, l) in self.lib.links.iter().enumerate() {
+            let sub = match self.link_results.get(&l.id) {
+                Some((_, Ok(r))) => format!(
+                    "{:.1} km · {} · {:+.0} dB margin",
+                    r.dist_m / 1000.0,
+                    if r.line_of_sight() { "line of sight" } else { "obstructed" },
+                    r.ab.margin_db.min(r.ba.margin_db)
+                ),
+                Some((_, Err(_))) => "couldn't be calculated".into(),
+                None => "not calculated".into(),
+            };
+            let colour = self.lib.site(&l.a.site_id).map(|s| s.colour);
+            if list_row(ui, ("link", i), self.sel_link == Some(i), colour, &l.name, &sub, "").clicked() {
+                select = Some(i);
+            }
+        }
+        if let Some(i) = select {
+            if self.sel_link != Some(i) {
+                self.confirm_delete_link = false;
+                self.fit_link(i);
+            }
+            self.sel_link = Some(i);
+        }
+        let Some(i) = self.sel_link else { return };
+        ui.add_space(6.0);
+        let lib = &mut self.lib;
+        let (sites, antennas) = (&lib.sites, &lib.antennas);
+        let l = &mut lib.links[i];
+        card(ui, "Link", |ui| {
+            egui::Grid::new("linkdef").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.label("Frequency");
+                ui.add(egui::DragValue::new(&mut l.freq_mhz).speed(0.025).range(20.0..=20000.0).suffix(" MHz").max_decimals(4));
+                ui.end_row();
+                ui.label("Polarisation");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut l.vertical, true, "Vertical");
+                    ui.radio_value(&mut l.vertical, false, "Horizontal");
+                });
+                ui.end_row();
+                ui.label("Mode");
+                let cur = MODES.iter().find(|m| m.key == l.mode.trim_end_matches('*')).map_or("Custom".to_string(), |m| {
+                    if l.mode.ends_with('*') { format!("{} (adjusted)", m.label) } else { m.label.to_string() }
+                });
+                egui::ComboBox::from_id_salt("link_mode").selected_text(cur).width(220.0).show_ui(ui, |ui| {
+                    for m in MODES {
+                        if ui.selectable_label(l.mode == m.key, m.label).clicked() {
+                            l.mode = m.key.into();
+                            l.bandwidth_hz = m.bandwidth_hz;
+                            l.snr_db = m.snr_db;
+                        }
+                    }
+                });
+                ui.end_row();
+                let before = (l.bandwidth_hz, l.snr_db);
+                ui.label("Bandwidth · SNR · NF");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut l.bandwidth_hz).speed(50.0).range(10.0..=200000.0).suffix(" Hz"));
+                    ui.add(egui::DragValue::new(&mut l.snr_db).speed(0.5).range(-40.0..=40.0).suffix(" dB"));
+                    ui.add(egui::DragValue::new(&mut l.noise_figure_db).speed(0.25).range(0.0..=40.0).suffix(" dB"));
+                });
+                ui.end_row();
+                if before != (l.bandwidth_hz, l.snr_db) {
+                    if let Some(m) = MODES.iter().find(|m| m.key == l.mode.trim_end_matches('*')) {
+                        let std = (m.bandwidth_hz, m.snr_db) == (l.bandwidth_hz, l.snr_db);
+                        l.mode = if std { m.key.into() } else { format!("{}*", m.key) };
+                    }
+                }
+            });
+            let req = l.required_dbm();
+            ui.label(RichText::new(format!("Each receiver needs {req:.1} dBm ({:.2} µV pd).", dbm_to_uv(req))).small().weak());
+        });
+        for (title, e) in [("End A", &mut l.a), ("End B", &mut l.b)] {
+            card(ui, title, |ui| {
+                egui::Grid::new(("linkend", title)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label("Site");
+                    let cur = sites.iter().find(|s| s.id == e.site_id).map_or("Choose…".to_string(), |s| s.name.clone());
+                    egui::ComboBox::from_id_salt(("le_site", title)).selected_text(cur).width(220.0).show_ui(ui, |ui| {
+                        for s in sites {
+                            ui.selectable_value(&mut e.site_id, s.id.clone(), &s.name);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Antenna");
+                    let cur = antennas.iter().find(|a| a.id == e.antenna_id).map_or("Choose…".to_string(), |a| a.name.clone());
+                    egui::ComboBox::from_id_salt(("le_ant", title)).selected_text(cur).width(220.0).show_ui(ui, |ui| {
+                        for a in antennas {
+                            ui.selectable_value(&mut e.antenna_id, a.id.clone(), &a.name);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Antenna height");
+                    ui.add(egui::DragValue::new(&mut e.height_m).speed(0.25).range(0.5..=3000.0).suffix(" m above ground"));
+                    ui.end_row();
+                    ui.label("Power · feeder loss");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut e.power_w).speed(0.5).range(0.01..=100000.0).suffix(" W"));
+                        ui.add(egui::DragValue::new(&mut e.feeder_loss_db).speed(0.1).range(0.0..=30.0).suffix(" dB"));
+                    });
+                    ui.end_row();
+                });
+            });
+        }
+        let busy = self.link_job.is_some();
+        let mut copy = false;
+        let mut delete = false;
+        let mut calc = false;
+        card(ui, "Calculate", |ui| {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new(RichText::new("▶ Calculate link").color(Color32::WHITE).strong()).fill(crate::theme::ACCENT).min_size(Vec2::new(150.0, 30.0))).clicked() {
+                    calc = true;
+                }
+                if busy {
+                    ui.spinner();
+                    ui.label("Fetching terrain and working it out…");
+                }
+            });
+            ui.label(RichText::new("Directional antennas are taken as pointed at each other. Once calculated, the link updates as you change it.").small().weak());
+            ui.add_space(4.0);
+            ui.separator();
+            self.save_bar(ui);
+            ui.horizontal(|ui| {
+                if ui.button("⧉ Copy").clicked() {
+                    copy = true;
+                }
+                if self.confirm_delete_link {
+                    ui.label(format!("Delete {}?", self.lib.links[i].name));
+                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(198, 40, 40))).clicked() {
+                        delete = true;
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.confirm_delete_link = false;
+                    }
+                } else if ui.button("🗑 Delete link").clicked() {
+                    self.confirm_delete_link = true;
+                }
+            });
+        });
+        if calc {
+            self.start_link(i);
+            self.fit_link(i);
+        }
+        if copy {
+            self.new_link(Some(i));
+            return;
+        }
+        if delete {
+            self.confirm_delete_link = false;
+            let l = self.lib.links[i].clone();
+            self.delete_link(&l.id);
+            self.write_saved();
+            self.status = format!("Deleted the link {}.", l.name);
+            return;
+        }
+        let names = (
+            self.lib.site(&self.lib.links[i].a.site_id).map_or("A".to_string(), |s| s.name.clone()),
+            self.lib.site(&self.lib.links[i].b.site_id).map_or("B".to_string(), |s| s.name.clone()),
+        );
+        match self.link_results.get(&self.lib.links[i].id) {
+            Some((_, Err(e))) => {
+                ui.label(RichText::new(e).color(Color32::from_rgb(185, 28, 28)));
+            }
+            Some((_, Ok(r))) => link_results_card(ui, r, &names.0, &names.1),
+            None => {}
+        }
+    }
+
+    /// Centre the map on a link with both ends in view.
+    fn fit_link(&mut self, i: usize) {
+        let l = &self.lib.links[i];
+        if let (Some(a), Some(b)) = (self.lib.site(&l.a.site_id), self.lib.site(&l.b.site_id)) {
+            let (d, brg) = terrain::distance_bearing(a.lat, a.lon, b.lat, b.lon);
+            let (lat, lon) = terrain::destination(a.lat, a.lon, brg, d / 2.0);
+            self.fit_plot(lat, lon, (d / 2000.0 * 1.25).max(1.0));
+        }
+    }
+
+    /// The terrain profile of the selected link, drawn under the map.
+    fn profile_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(i) = self.sel_link else { return };
+        let l = &self.lib.links[i];
+        let Some((_, Ok(r))) = self.link_results.get(&l.id) else { return };
+        let na = self.lib.site(&l.a.site_id).map_or("A".to_string(), |s| s.name.clone());
+        let nb = self.lib.site(&l.b.site_id).map_or("B".to_string(), |s| s.name.clone());
+        profile_chart(ui, r, &na, &nb);
     }
 
     // ------------------------------------------------------------------ plots
@@ -954,7 +1268,15 @@ impl App {
         ui.add_space(6.0);
         let mut delete = false;
         let mut copy = false;
-        let users: Vec<String> = self.lib.plots.iter().filter(|p| p.antenna_id == self.lib.antennas[i].id).map(|p| p.name.clone()).collect();
+        let aid = self.lib.antennas[i].id.clone();
+        let users: Vec<String> = self
+            .lib
+            .plots
+            .iter()
+            .filter(|p| p.antenna_id == aid)
+            .map(|p| p.name.clone())
+            .chain(self.lib.links.iter().filter(|l| l.a.antenna_id == aid || l.b.antenna_id == aid).map(|l| l.name.clone()))
+            .collect();
         card(ui, "Antenna", |ui| {
             let a = &mut self.lib.antennas[i];
             egui::Grid::new("ant").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
@@ -1471,7 +1793,7 @@ impl App {
         let painter = ui.painter_at(proj.rect);
 
         // coverage overlays, left off while sites are being placed so the map can be read
-        let show_cov = self.tab != Tab::Sites;
+        let show_cov = matches!(self.tab, Tab::Coverage | Tab::Antenna);
         if !show_cov {
             self.popup = None;
         }
@@ -1488,6 +1810,32 @@ impl App {
             });
             let r = proj.global_rect(m.img_x0, m.img_y0, m.img_x0 + m.img_w as f64, m.img_y0 + m.img_h as f64, m.img_zoom);
             painter.image(tex.id(), r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), tint);
+        }
+
+        // links: the selected one bold, the others faint
+        if self.tab == Tab::Links {
+            for (i, l) in self.lib.links.iter().enumerate() {
+                if let (Some(a), Some(b)) = (self.lib.site(&l.a.site_id), self.lib.site(&l.b.site_id)) {
+                    let sel = self.sel_link == Some(i);
+                    let ok = match self.link_results.get(&l.id) {
+                        Some((_, Ok(r))) => Some(r.line_of_sight()),
+                        _ => None,
+                    };
+                    let col = match ok {
+                        Some(true) => Color32::from_rgb(21, 160, 61),
+                        Some(false) => Color32::from_rgb(220, 38, 38),
+                        None => crate::theme::ACCENT,
+                    };
+                    let (pa, pb) = (proj.to_screen(a.lat, a.lon), proj.to_screen(b.lat, b.lon));
+                    painter.line_segment([pa, pb], egui::Stroke::new(if sel { 4.0 } else { 2.0 }, if sel { col } else { col.gamma_multiply(0.45) }));
+                    if sel {
+                        if let Some((_, Ok(r))) = self.link_results.get(&l.id) {
+                            let (wl, wo) = terrain::destination(a.lat, a.lon, r.bearing_ab, r.worst_at_m);
+                            painter.circle_stroke(proj.to_screen(wl, wo), 6.0, egui::Stroke::new(2.0, Color32::from_rgb(217, 119, 6)));
+                        }
+                    }
+                }
+            }
         }
 
         // pins
@@ -1553,7 +1901,7 @@ impl App {
         let mut legend_levels = legend_levels;
         if !show_cov {
             legend_levels = None;
-            if !self.results.is_empty() {
+            if !self.results.is_empty() && self.tab == Tab::Sites {
                 let painter = ui.painter_at(proj.rect);
                 let g = painter.layout_no_wrap("Coverage is hidden while you edit sites".into(), egui::FontId::proportional(12.0), crate::theme::ink_soft());
                 let r = egui::Rect::from_min_size(proj.rect.right_top() + Vec2::new(-g.size().x - 22.0, 10.0), g.size() + Vec2::new(12.0, 6.0));
@@ -1648,7 +1996,7 @@ impl App {
         ctx.request_repaint();
         if shot.done.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if self.frame >= 90 && !shot.requested && self.job.is_none() {
+        } else if self.frame >= 90 && !shot.requested && self.job.is_none() && self.link_job.is_none() {
             shot.requested = true;
             let path = shot.path.clone();
             let done = shot.done.clone();
@@ -1665,6 +2013,15 @@ impl App {
                 done.store(true, Ordering::Relaxed);
                 c2.request_repaint();
             });
+        }
+    }
+
+    /// For automated tests: choose a link and calculate it.
+    pub fn calculate_link(&mut self, i: usize) {
+        if i < self.lib.links.len() {
+            self.sel_link = Some(i);
+            self.start_link(i);
+            self.fit_link(i);
         }
     }
 
@@ -1699,6 +2056,7 @@ impl eframe::App for App {
         self.frame += 1;
         self.poll();
         self.sync_results(&ctx);
+        self.poll_link(&ctx);
         while let Ok(n) = self.notes_rx.try_recv() {
             self.status = n;
             if !self.status.starts_with("Removed") {
@@ -1755,11 +2113,17 @@ impl eframe::App for App {
                     Tab::Sites => self.sites_tab(ui),
                     Tab::Antenna => self.antenna_tab(ui),
                     Tab::Coverage => self.coverage_tab(ui),
+                    Tab::Links => self.links_tab(ui),
                     t => self.later_tab(ui, t),
                 }
                 ui.add_space(10.0);
             });
         });
+        let has_profile = self.tab == Tab::Links
+            && self.sel_link.is_some_and(|i| matches!(self.link_results.get(&self.lib.links[i].id), Some((_, Ok(_)))));
+        if has_profile {
+            egui::Panel::bottom("profile").resizable(true).default_size(320.0).size_range(180.0..=700.0).frame(egui::Frame::NONE).show(ui, |ui| self.profile_panel(ui));
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.map_panel(ui));
         self.about(&ctx);
         if self.ask_quit {
@@ -1963,4 +2327,196 @@ fn open_folder(p: &std::path::Path) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let cmd = "xdg-open";
     let _ = std::process::Command::new(cmd).arg(p).spawn();
+}
+
+fn link_results_card(ui: &mut egui::Ui, r: &link::LinkResult, na: &str, nb: &str) {
+    card(ui, "Result", |ui| {
+        let (txt, col) = if r.worst_clearance >= 0.6 {
+            ("Clear line of sight (60 % of the first Fresnel zone clear)", Color32::from_rgb(21, 128, 61))
+        } else if r.worst_clearance >= 0.0 {
+            ("Line of sight, but the Fresnel zone is partly blocked", Color32::from_rgb(217, 119, 6))
+        } else {
+            ("No line of sight: the terrain blocks the path", Color32::from_rgb(185, 28, 28))
+        };
+        ui.label(RichText::new(txt).strong().color(col));
+        egui::Grid::new("linkres").num_columns(2).spacing([10.0, 3.0]).striped(true).show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                ui.label(RichText::new(k).weak());
+                ui.label(RichText::new(v).monospace());
+                ui.end_row();
+            };
+            row(ui, "Distance", format!("{:.2} km", r.dist_m / 1000.0));
+            row(ui, "Bearing", format!("{na} → {nb} {:.1}°, back {:.1}°", r.bearing_ab, r.bearing_ba));
+            row(ui, "Elevation", format!("{:+.2}° from {na}, {:+.2}° from {nb}", r.elev_a, r.elev_b));
+            row(ui, "Worst clearance", format!("{:.0} % of F1, {:.2} km from {na}", r.worst_clearance * 100.0, r.worst_at_m / 1000.0));
+            row(ui, "Free-space loss", format!("{:.1} dB", r.free_space_db));
+            let mode = match r.mode {
+                itm::Mode::LineOfSight => "line of sight (by its smooth-earth horizons)",
+                itm::Mode::Diffraction => "diffraction",
+                itm::Mode::Troposcatter => "troposcatter",
+            };
+            row(ui, "Path loss", format!("{:.1} dB, {:+.1} over free space", r.loss_db, r.loss_db - r.free_space_db));
+            row(ui, "Longley-Rice region", mode.to_string());
+        });
+        ui.add_space(4.0);
+        egui::Grid::new("linkdirs").num_columns(5).spacing([10.0, 3.0]).show(ui, |ui| {
+            for h in ["", "EIRP", "Signal", "µV", "Margin"] {
+                ui.label(RichText::new(h).small().weak());
+            }
+            ui.end_row();
+            for (lbl, d) in [(format!("{na} → {nb}"), &r.ab), (format!("{nb} → {na}"), &r.ba)] {
+                ui.label(lbl);
+                ui.label(RichText::new(format!("{:.1} dBm", d.eirp_dbm)).monospace());
+                ui.label(RichText::new(format!("{:.1} dBm", d.signal_dbm)).monospace().strong());
+                let uv = dbm_to_uv(d.signal_dbm);
+                ui.label(RichText::new(if uv < 10.0 { format!("{uv:.2}") } else { format!("{uv:.0}") }).monospace());
+                let col = if d.margin_db >= 10.0 {
+                    Color32::from_rgb(21, 128, 61)
+                } else if d.margin_db >= 0.0 {
+                    Color32::from_rgb(217, 119, 6)
+                } else {
+                    Color32::from_rgb(185, 28, 28)
+                };
+                ui.label(RichText::new(format!("{:+.1} dB", d.margin_db)).monospace().color(col));
+                ui.end_row();
+            }
+        });
+        ui.label(
+            RichText::new(format!(
+                "Margin is over the {:.1} dBm the receiver needs. Antenna patterns cost {:.1} dB. Longley-Rice median over the terrain, k = 4/3.",
+                r.ab.required_dbm,
+                r.ab.pattern_db
+            ))
+            .small()
+            .weak(),
+        );
+    });
+}
+
+/// Terrain, earth bulge, line of sight and first Fresnel zone between the two ends.
+fn profile_chart(ui: &mut egui::Ui, r: &link::LinkResult, na: &str, nb: &str) {
+    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let v = ui.visuals();
+    painter.rect_filled(rect, 0.0, v.extreme_bg_color);
+    let n = r.z.len() - 1;
+    let xs: Vec<f64> = (0..=n).map(|k| k as f64 * r.xi).collect();
+    let ground: Vec<f64> = xs.iter().zip(&r.z).map(|(&x, &z)| z + r.bulge(x)).collect();
+    let gmin = ground.iter().cloned().fold(f64::INFINITY, f64::min);
+    let mut lo = gmin.min(r.ant_a.min(r.ant_b));
+    // room for the line of sight and 60 % of the Fresnel zone; the rest of the zone may run off the top
+    let mut hi = xs.iter().map(|&x| r.los(x) + 0.6 * r.fresnel(x)).chain(ground.iter().cloned()).fold(f64::NEG_INFINITY, f64::max);
+    let pad = ((hi - lo) * 0.08).max(5.0);
+    lo -= pad;
+    hi += pad;
+    let plot = egui::Rect::from_min_max(rect.min + Vec2::new(56.0, 26.0), rect.max - Vec2::new(16.0, 30.0));
+    let px = |x: f64| plot.left() + (x / r.dist_m) as f32 * plot.width();
+    let py = |h: f64| plot.bottom() - ((h - lo) / (hi - lo)) as f32 * plot.height();
+    let p = |x: f64, h: f64| egui::pos2(px(x), py(h));
+    let ink = crate::theme::ink();
+    let weak = v.weak_text_color();
+    let font = egui::FontId::proportional(11.0);
+
+    // grid and axes
+    let step = nice_step(hi - lo, 6.0);
+    let mut h = (lo / step).ceil() * step;
+    while h <= hi {
+        painter.line_segment([p(0.0, h), p(r.dist_m, h)], egui::Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color.gamma_multiply(0.5)));
+        painter.text(egui::pos2(plot.left() - 6.0, py(h)), egui::Align2::RIGHT_CENTER, format!("{:.0} m", h + 0.0), font.clone(), weak);
+        h += step;
+    }
+    let kstep = nice_step(r.dist_m / 1000.0, 8.0);
+    let mut k = 0.0;
+    while k <= r.dist_m / 1000.0 + 1e-9 {
+        painter.text(egui::pos2(px(k * 1000.0), plot.bottom() + 4.0), egui::Align2::CENTER_TOP, format!("{k:.*} km", if kstep < 1.0 { 1 } else { 0 }), font.clone(), weak);
+        k += kstep;
+    }
+
+    let frame_painter = painter;
+    let painter = ui.painter_at(plot.expand2(Vec2::new(8.0, 0.0)));
+    // the curved earth (sea level bent by the bulge)
+    let sea: Vec<egui::Pos2> = (0..=100).map(|i| p(r.dist_m * i as f64 / 100.0, r.bulge(r.dist_m * i as f64 / 100.0))).collect();
+    if sea.iter().any(|q| q.y < plot.bottom()) {
+        painter.add(egui::Shape::dashed_line(&sea, egui::Stroke::new(1.0, Color32::from_rgb(70, 130, 200)), 6.0, 4.0));
+    }
+    // terrain
+    let terr = Color32::from_rgb(160, 120, 80);
+    let stride = (n / 1500).max(1);
+    let mut mesh = egui::Mesh::default();
+    let fill = terr.gamma_multiply(0.55);
+    for k in (0..=n).step_by(stride) {
+        let top = p(xs[k], ground[k]);
+        mesh.colored_vertex(top, fill);
+        mesh.colored_vertex(egui::pos2(top.x, plot.bottom()), fill);
+        let v = mesh.vertices.len() as u32;
+        if v >= 4 {
+            mesh.add_triangle(v - 4, v - 3, v - 2);
+            mesh.add_triangle(v - 3, v - 1, v - 2);
+        }
+    }
+    painter.add(mesh);
+    let outline: Vec<egui::Pos2> = (0..=n).step_by(stride).map(|k| p(xs[k], ground[k])).collect();
+    painter.add(egui::Shape::line(outline, egui::Stroke::new(1.5, terr)));
+    // Fresnel zone and line of sight
+    let up: Vec<egui::Pos2> = (0..=200).map(|i| { let x = r.dist_m * i as f64 / 200.0; p(x, r.los(x) + r.fresnel(x)) }).collect();
+    let dn: Vec<egui::Pos2> = (0..=200).map(|i| { let x = r.dist_m * i as f64 / 200.0; p(x, r.los(x) - r.fresnel(x)) }).collect();
+    let dn60: Vec<egui::Pos2> = (0..=200).map(|i| { let x = r.dist_m * i as f64 / 200.0; p(x, r.los(x) - 0.6 * r.fresnel(x)) }).collect();
+    let fz = Color32::from_rgb(47, 111, 222);
+    painter.add(egui::Shape::line(up, egui::Stroke::new(1.0, fz.gamma_multiply(0.7))));
+    painter.add(egui::Shape::line(dn, egui::Stroke::new(1.0, fz.gamma_multiply(0.7))));
+    painter.add(egui::Shape::dashed_line(&dn60, egui::Stroke::new(1.5, Color32::from_rgb(120, 170, 255)), 5.0, 4.0));
+    let los_col = if r.line_of_sight() { Color32::from_rgb(21, 160, 61) } else { Color32::from_rgb(220, 38, 38) };
+    painter.line_segment([p(0.0, r.ant_a), p(r.dist_m, r.ant_b)], egui::Stroke::new(2.0, los_col));
+    // masts
+    for (x, g, top, name, align) in [(0.0, ground[0], r.ant_a, na, egui::Align2::LEFT_BOTTOM), (r.dist_m, ground[n], r.ant_b, nb, egui::Align2::RIGHT_BOTTOM)] {
+        painter.line_segment([p(x, g), p(x, top)], egui::Stroke::new(3.0, ink));
+        painter.circle_filled(p(x, top), 4.0, ink);
+        painter.text(p(x, top) + Vec2::new(if x == 0.0 { 6.0 } else { -6.0 }, -4.0), align, name, egui::FontId::proportional(12.0), ink);
+    }
+    // worst point
+    let wx = r.worst_at_m;
+    let wk = ((wx / r.xi).round() as usize).min(n);
+    painter.circle_stroke(p(wx, ground[wk]), 5.0, egui::Stroke::new(2.0, Color32::from_rgb(217, 119, 6)));
+    frame_painter.text(
+        rect.left_top() + Vec2::new(12.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        format!("Path profile {na} → {nb} · {:.2} km · {:.0} MHz · earth curvature k = 4/3 · ━ line of sight · ┅ 60 % of first Fresnel zone", r.dist_m / 1000.0, r.freq_mhz),
+        font.clone(),
+        weak,
+    );
+    // hover readout
+    if let Some(pos) = resp.hover_pos() {
+        if plot.contains(pos) {
+            let x = ((pos.x - plot.left()) / plot.width()) as f64 * r.dist_m;
+            let k = ((x / r.xi).round() as usize).min(n);
+            painter.line_segment([egui::pos2(pos.x, plot.top()), egui::pos2(pos.x, plot.bottom())], egui::Stroke::new(1.0, weak));
+            let clr = r.los(x) - ground[k];
+            let painter = &frame_painter;
+            let t = format!(
+                "{:.2} km from {na}\nground {:.0} m (+{:.1} m bulge)\nline of sight {:.0} m · clearance {:+.0} m\nfirst Fresnel zone {:.0} m ({:.0} %)",
+                x / 1000.0,
+                r.z[k],
+                r.bulge(x),
+                r.los(x),
+                clr,
+                r.fresnel(x),
+                clr / r.fresnel(x).max(0.01) * 100.0
+            );
+            let g = painter.layout_no_wrap(t, font.clone(), ink);
+            let mut at = pos + Vec2::new(12.0, 12.0);
+            if at.x + g.size().x + 12.0 > rect.right() {
+                at.x = pos.x - g.size().x - 20.0;
+            }
+            let bg = egui::Rect::from_min_size(at, g.size() + Vec2::new(10.0, 8.0));
+            painter.rect_filled(bg, 5.0, crate::theme::label_bg());
+            painter.galley(at + Vec2::new(5.0, 4.0), g, ink);
+        }
+    }
+}
+
+/// A round number near span/count: 1, 2 or 5 × a power of ten.
+fn nice_step(span: f64, count: f64) -> f64 {
+    let raw = (span / count).max(1e-6);
+    let p = 10f64.powf(raw.log10().floor());
+    [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * p).find(|s| *s >= raw).unwrap_or(10.0 * p)
 }

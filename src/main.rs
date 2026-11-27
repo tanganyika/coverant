@@ -5,12 +5,21 @@ mod app;
 mod coords;
 mod coverage;
 mod itm;
+mod link;
 mod map;
 mod model;
 mod terrain;
 mod theme;
 
 use std::path::PathBuf;
+
+/// The starting window size; COVERANT_WINDOW=WxH sets another (for screenshots).
+fn window_size() -> [f32; 2] {
+    std::env::var("COVERANT_WINDOW")
+        .ok()
+        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?])))
+        .unwrap_or([1360.0, 860.0])
+}
 
 fn main() -> eframe::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -20,11 +29,13 @@ fn main() -> eframe::Result<()> {
     let mut save = false;
     let mut popup: Option<(f64, f64)> = None;
     let mut select: Option<usize> = None;
+    let mut link: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => shot = args.next().map(PathBuf::from),
             "--tab" => tab = args.next().and_then(|t| app::Tab::from_name(&t)),
             "--plot" => plot = true,
+            "--link" => link = args.next().and_then(|v| v.parse().ok()),
             "--select" => select = args.next().and_then(|v| v.parse().ok()),
             "--save" => save = true,
             "--popup" => popup = args.next().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))),
@@ -38,7 +49,7 @@ fn main() -> eframe::Result<()> {
     let glow = std::env::var("COVERANT_RENDERER").map(|r| r.eq_ignore_ascii_case("glow")).unwrap_or(false);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1360.0, 860.0])
+            .with_inner_size(window_size())
             .with_min_inner_size([800.0, 560.0])
             .with_title("Coverant")
             .with_app_id("coverant")
@@ -51,6 +62,9 @@ fn main() -> eframe::Result<()> {
         options.clone(),
         Box::new(move |cc| {
             let mut a = app::App::new(cc, tab, shot.clone());
+            if let Some(i) = link {
+                a.calculate_link(i);
+            }
             if let Some(i) = select {
                 a.select_plot(i);
             }

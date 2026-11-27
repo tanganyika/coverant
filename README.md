@@ -42,8 +42,14 @@ processor core.
 - **Maps:** OpenStreetMap, OpenTopoMap or Esri satellite imagery, optionally in grey so the
   coverage stands out. Light and dark themes (View menu).
 
-**Coming next:** path profiles and link quality between two or more sites, and the radio
-horizon from a site (the *Links* and *Horizon* tabs).
+- **Links between two sites.** Pick a site, an antenna, a height, power and feeder loss for
+  each end, and the frequency and mode. Coverant draws the terrain profile with the earth's
+  bulge (k = 4/3), the line of sight and the first Fresnel zone (with the 60 % line), finds
+  the worst clearance, and gives the Longley-Rice path loss and the signal and margin at
+  each end. Hover over the profile for heights and clearance at any point. A calculated
+  link updates as you change it.
+
+**Coming next:** the radio horizon from a site (the *Horizon* tab).
 
 ## Installing
 
@@ -52,7 +58,7 @@ Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubu
 (Apple Silicon) tarball. For the package:
 
 ```
-sudo apt install ./coverant_0.1.1-1_amd64.deb
+sudo apt install ./coverant_0.2.0-1_amd64.deb
 ```
 
 It adds Coverant to the applications menu (under Ham Radio / Science).

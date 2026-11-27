@@ -242,7 +242,7 @@ impl PlotDef {
     /// The signal every receiver needs for this plot's mode: thermal noise in the
     /// bandwidth, plus the noise figure, plus the SNR the mode needs. None for "custom".
     pub fn required_dbm(&self) -> Option<f64> {
-        (self.mode != "custom").then(|| -174.0 + 10.0 * self.bandwidth_hz.max(1.0).log10() + self.noise_figure_db + self.snr_db)
+        (self.mode != "custom").then(|| required_dbm(self.bandwidth_hz, self.noise_figure_db, self.snr_db))
     }
     pub fn surroundings_label(&self) -> String {
         SURROUNDINGS.iter().find(|s| s.1 == self.clutter_db).map_or(format!("Custom, {:.0} dB", self.clutter_db), |s| s.0.into())
@@ -264,12 +264,82 @@ impl PlotDef {
     }
 }
 
+/// Thermal noise in the bandwidth, plus the noise figure, plus the SNR needed (dBm).
+pub fn required_dbm(bandwidth_hz: f64, noise_figure_db: f64, snr_db: f64) -> f64 {
+    -174.0 + 10.0 * bandwidth_hz.max(1.0).log10() + noise_figure_db + snr_db
+}
+
+/// One end of a link: a site, a library antenna on it and the radio there.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LinkEnd {
+    pub site_id: String,
+    pub antenna_id: String,
+    pub height_m: f64,
+    pub power_w: f64,
+    pub feeder_loss_db: f64,
+}
+
+impl Default for LinkEnd {
+    fn default() -> Self {
+        let p = PlotDef::default();
+        LinkEnd { site_id: String::new(), antenna_id: String::new(), height_m: p.height_m, power_w: p.power_w, feeder_loss_db: p.feeder_loss_db }
+    }
+}
+
+/// A radio link between two sites.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LinkDef {
+    pub id: String,
+    pub name: String,
+    pub a: LinkEnd,
+    pub b: LinkEnd,
+    pub freq_mhz: f64,
+    pub vertical: bool,
+    /// a key from MODES (an "*" after it means its numbers were changed)
+    pub mode: String,
+    pub bandwidth_hz: f64,
+    pub snr_db: f64,
+    pub noise_figure_db: f64,
+}
+
+impl Default for LinkDef {
+    fn default() -> Self {
+        let p = PlotDef::default();
+        LinkDef {
+            id: String::new(),
+            name: String::new(),
+            a: LinkEnd::default(),
+            b: LinkEnd::default(),
+            freq_mhz: p.freq_mhz,
+            vertical: true,
+            mode: p.mode,
+            bandwidth_hz: p.bandwidth_hz,
+            snr_db: p.snr_db,
+            noise_figure_db: p.noise_figure_db,
+        }
+    }
+}
+
+impl LinkDef {
+    pub fn required_dbm(&self) -> f64 {
+        required_dbm(self.bandwidth_hz, self.noise_figure_db, self.snr_db)
+    }
+    /// The radio and antenna at one end, as the engine wants them.
+    pub fn station(&self, e: &LinkEnd, a: &AntennaDef) -> Station {
+        let p = PlotDef { height_m: e.height_m, freq_mhz: self.freq_mhz, power_w: e.power_w, feeder_loss_db: e.feeder_loss_db, vertical: self.vertical, mode: "custom".into(), ..Default::default() };
+        p.station(a)
+    }
+}
+
 /// Everything the user edits and saves.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub sites: Vec<Site>,
     pub antennas: Vec<AntennaDef>,
     pub plots: Vec<PlotDef>,
+    pub links: Vec<LinkDef>,
 }
 
 impl Library {
@@ -573,7 +643,7 @@ pub fn save_settings(s: &Settings) -> Result<(), String> {
 
 /// Sites, antennas and plots, with older files brought up to date (and saved again if they were).
 pub fn load_library() -> Library {
-    let mut lib = Library { sites: load_sites(), antennas: read("antennas.json"), plots: read("plots.json") };
+    let mut lib = Library { sites: load_sites(), antennas: read("antennas.json"), plots: read("plots.json"), links: read("links.json") };
     if lib.sites.iter().any(|s| s.station.is_some()) {
         let d = data_dir();
         let _ = std::fs::copy(d.join("sites.json"), d.join("sites-before-antenna-library.json"));
@@ -586,6 +656,7 @@ pub fn load_library() -> Library {
 pub fn save_library(l: &Library) -> Result<(), String> {
     write("antennas.json", &l.antennas)?;
     write("plots.json", &l.plots)?;
+    write("links.json", &l.links)?;
     write("sites.json", &l.sites)
 }
 
