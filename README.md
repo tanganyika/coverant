@@ -66,15 +66,44 @@ tab heading. The same pages are in [docs/](docs/01-getting-started.md) here on G
 
 ## Installing
 
-Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubuntu package
-(Ubuntu 22.04, Debian 12, Mint 21 or newer), a Linux tarball, a Windows zip and a macOS
-(Apple Silicon) tarball. For the package:
+Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubuntu package,
+a Linux tarball, a Windows zip and a macOS (Apple Silicon) tarball.
 
-```
-sudo apt install ./coverant_0.4.0-1_amd64.deb
+### Linux: the APT repository
+
+Add the repository once, and new versions arrive with the system's other updates (Ubuntu
+22.04, Debian 12, Linux Mint 21, Zorin 17, Pop!_OS 22.04 or newer, 64-bit PC):
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://tanganyika.github.io/coverant/apt/coverant.gpg | sudo tee /etc/apt/keyrings/coverant.gpg >/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/coverant.gpg] https://tanganyika.github.io/coverant/apt stable main" | sudo tee /etc/apt/sources.list.d/coverant.list
+sudo apt update
+sudo apt install coverant
 ```
 
-It adds Coverant to the applications menu (under Ham Radio / Science).
+Or download the `.deb` from the release and install it with the software installer, or with
+`sudo apt install ./coverant_<version>-1_amd64.deb`. Either way Coverant appears in the
+applications menu (under Ham Radio / Science); remove it with `sudo apt remove coverant`.
+On other distributions, unpack `coverant-linux-x86_64.tar.gz` and run `./coverant`.
+
+### Windows 10 or 11
+
+Unzip `coverant-windows-x86_64.zip` anywhere and run `coverant.exe`. It isn't code-signed,
+so the first time Windows may say it protected your PC: choose **More info → Run anyway**.
+
+### macOS (Apple Silicon)
+
+Unpack `coverant-macos-arm64.tar.gz`. It isn't notarised by Apple, so macOS will refuse to
+open it at first. Either right-click `coverant` in Finder, choose **Open** and confirm, or
+run this once in Terminal in that folder:
+
+```sh
+xattr -d com.apple.quarantine coverant
+./coverant
+```
+
+Intel Macs aren't supported by the release build yet; build it from source (below).
 
 ## Building and running
 
