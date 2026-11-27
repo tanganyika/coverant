@@ -477,6 +477,8 @@ pub struct Settings {
     pub theme: String,
     pub basemap: usize,
     pub grey_map: bool,
+    /// draw every ticked plot at once rather than just the selected one
+    pub show_all_plots: bool,
     /// map view at exit: lat, lon, zoom
     pub view: Option<(f64, f64, f64)>,
     /// site ids whose coverage is hidden
@@ -498,6 +500,7 @@ impl Default for Settings {
             theme: String::new(),
             basemap: 0,
             grey_map: true,
+            show_all_plots: false,
             view: None,
             hidden: vec![],
             version: SETTINGS_VERSION,

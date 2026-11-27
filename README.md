@@ -52,7 +52,7 @@ Each [release](https://github.com/tanganyika/coverant/releases) has a Debian/Ubu
 (Apple Silicon) tarball. For the package:
 
 ```
-sudo apt install ./coverant_0.1.0-1_amd64.deb
+sudo apt install ./coverant_0.1.1-1_amd64.deb
 ```
 
 It adds Coverant to the applications menu (under Ham Radio / Science).

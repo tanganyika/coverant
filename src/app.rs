@@ -78,6 +78,16 @@ struct Job {
     started: std::time::Instant,
 }
 
+struct RunInputs {
+    site: Site,
+    st: model::Station,
+    settings: Settings,
+    mode: String,
+    levels: Vec<coverage::Level>,
+    eirp: f64,
+    geometry: String,
+}
+
 /// A plot ready to draw.
 struct Plot {
     cov: Coverage,
@@ -114,6 +124,8 @@ pub struct App {
     results: HashMap<String, Plot>,
     /// map size last frame, to fit a finished plot
     map_size: Vec2,
+    /// plots whose site, antenna or model changed since they ran
+    stale: std::collections::HashSet<String>,
     job: Option<Job>,
     status: String,
     error: Option<String>,
@@ -177,6 +189,7 @@ impl App {
             terrains: HashMap::new(),
             results,
             map_size: Vec2::new(900.0, 700.0),
+            stale: Default::default(),
             job: None,
             status: if n == 0 {
                 "Ready. Press “New site”, or right-click the map where your site is.".into()
@@ -458,17 +471,12 @@ impl App {
 
     // ------------------------------------------------------------------ coverage
 
-    fn start_plot(&mut self) {
-        let Some(i) = self.sel_plot else { return };
-        if self.job.is_some() {
-            return;
-        }
-        let p = self.lib.plots[i].clone();
-        let (Some(site), Some(ant)) = (self.lib.site(&p.site_id).cloned(), self.lib.antenna(&p.antenna_id).cloned()) else {
-            self.status = "Choose a site and an antenna for this plot first.".into();
-            return;
-        };
-        let st = p.station(&ant);
+    /// What a run of plot `i` uses, as things stand now.
+    fn run_inputs(&self, i: usize) -> Option<RunInputs> {
+        let p = &self.lib.plots[i];
+        let site = self.lib.site(&p.site_id)?.clone();
+        let ant = self.lib.antenna(&p.antenna_id)?;
+        let st = p.station(ant);
         let mut settings = self.settings.clone();
         settings.model.radius_km = p.radius(&site, self.settings.model.radius_km);
         if let Some(req) = p.required_dbm() {
@@ -479,6 +487,80 @@ impl App {
         settings.model.clutter_db = p.clutter_db;
         let mut mode = if p.mode == "custom" { String::new() } else { format!("{} · {:.0} dBm needed · ", p.mode_label(), p.required_dbm().unwrap_or(0.0)) };
         mode += &format!("{:.0} % of spots · {}", settings.model.location_pct, p.surroundings_label().split(" (").next().unwrap_or(""));
+        let levels = coverage::levels(&st, &settings);
+        let (a, m) = (&st.antenna, &settings.model);
+        let geometry = format!(
+            "{:.6} {:.6} {:?} | {} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} | {:?}",
+            site.lat, site.lon, site.ground_m,
+            st.freq_mhz, st.vertical, a.height_m, a.directional, a.azimuth, a.h_beamwidth, a.front_back_db, a.tilt, a.v_beamwidth,
+            m.radius_km, m.detail, m.terrain_zoom, m.climate, m.ns, m.eps, m.sgm, m.time_pct, m.situation_pct,
+            levels.iter().map(|l| (&l.name, l.height_m)).collect::<Vec<_>>()
+        );
+        Some(RunInputs { eirp: st.eirp_dbm(), site, st, settings, mode, levels, geometry })
+    }
+
+    /// Keep finished plots in step with power, gain, loss and "needs" changes, which only
+    /// shift the signal, and note which ones need running again.
+    fn sync_results(&mut self, ctx: &egui::Context) {
+        let busy_pointer = ctx.input(|i| i.pointer.any_down());
+        self.stale.clear();
+        for i in 0..self.lib.plots.len() {
+            let id = self.lib.plots[i].id.clone();
+            let Some(inp) = self.run_inputs(i) else { continue };
+            let Some(r) = self.results.get_mut(&id) else { continue };
+            if r.cov.meta.geometry.is_empty() || r.cov.meta.geometry != inp.geometry {
+                self.stale.insert(id);
+                continue;
+            }
+            if !busy_pointer && (r.cov.differs(inp.eirp, &inp.levels) || r.cov.meta.mode != inp.mode) {
+                if r.cov.adjust(inp.eirp, &inp.levels) {
+                    r.cov.meta.mode = inp.mode;
+                    r.tex = None;
+                    let _ = r.cov.save(&id);
+                } else {
+                    self.stale.insert(id);
+                }
+            }
+        }
+    }
+
+    /// The plots drawn on the map, bottom first: the selected one, or every ticked one with
+    /// the selected one on top.
+    fn on_map(&self) -> Vec<usize> {
+        let sel = self.sel_plot.filter(|&i| self.results.contains_key(&self.lib.plots[i].id));
+        if !self.settings.show_all_plots {
+            return sel.into_iter().collect();
+        }
+        let mut v: Vec<usize> = (0..self.lib.plots.len())
+            .filter(|&i| Some(i) != sel && self.results.contains_key(&self.lib.plots[i].id) && !self.settings.hidden.contains(&self.lib.plots[i].id))
+            .collect();
+        v.extend(sel);
+        v
+    }
+
+    /// After the site selection changes: edit that site's plot if the current one is elsewhere.
+    fn follow_site(&mut self) {
+        let Some(si) = self.selected else { return };
+        let sid = &self.lib.sites[si].id;
+        if self.sel_plot.is_some_and(|p| &self.lib.plots[p].site_id == sid) {
+            return;
+        }
+        if let Some(p) = self.lib.plots.iter().position(|p| &p.site_id == sid) {
+            self.sel_plot = Some(p);
+            self.confirm_delete_plot = false;
+        }
+    }
+
+    fn start_plot(&mut self) {
+        let Some(i) = self.sel_plot else { return };
+        if self.job.is_some() {
+            return;
+        }
+        let p = self.lib.plots[i].clone();
+        let Some(RunInputs { site, st, settings, mode, geometry, .. }) = self.run_inputs(i) else {
+            self.status = "Choose a site and an antenna for this plot first.".into();
+            return;
+        };
         let terrain = self.terrain(settings.model.terrain_zoom);
         let progress = Progress::new();
         let (tx, rx) = channel();
@@ -486,6 +568,7 @@ impl App {
         std::thread::spawn(move || {
             let r = coverage::run(&site, &st, &settings, &terrain, &p2).map(|mut c| {
                 c.meta.mode = mode;
+                c.meta.geometry = geometry;
                 c
             });
             let _ = tx.send(r);
@@ -707,6 +790,7 @@ impl App {
                 self.confirm_delete = false;
             }
             self.selected = Some(i);
+            self.follow_site();
         }
         if let Some(i) = goto {
             self.view.lat = self.lib.sites[i].lat;
@@ -969,6 +1053,28 @@ impl App {
         if self.lib.plots.is_empty() {
             ui.label(RichText::new("No plots yet. A plot puts one of your antennas on one of your sites. Press “New plot”.").weak());
         }
+        // the site chosen on the Sites tab or the map has no plot yet
+        if let Some(si) = self.selected {
+            let s = &self.lib.sites[si];
+            if !self.lib.plots.iter().any(|p| p.site_id == s.id) {
+                let name = s.name.clone();
+                let mut make = false;
+                egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(8).inner_margin(8).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{name} has no coverage plot yet."));
+                        if ui.button(format!("＋ Plot for {name}")).clicked() {
+                            make = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                if make {
+                    self.new_plot(None);
+                }
+            }
+        }
+        ui.checkbox(&mut self.settings.show_all_plots, "Show every ticked plot on the map, not just the selected one");
         let mut select = None;
         let mut toggle = None;
         let mut zoom = None;
@@ -981,15 +1087,21 @@ impl App {
                 self.lib.antenna(&p.antenna_id).map_or("no antenna", |a| a.name.as_str())
             );
             let done = self.results.contains_key(&p.id);
+            let stale = self.stale.contains(&p.id);
+            let all = self.settings.show_all_plots;
             let mut shown = !self.settings.hidden.contains(&p.id);
             let sel = self.sel_plot == Some(i);
             let r = list_row_with(ui, ("plot", i), sel, colour, &p.name, &sub, |ui| {
-                if done {
+                if done && all {
                     if ui.checkbox(&mut shown, "").on_hover_text("Show on the map").changed() {
                         toggle = Some((p.id.clone(), shown));
                     }
-                } else {
+                }
+                if !done {
                     ui.label(RichText::new("not run").small().weak());
+                } else if stale {
+                    ui.label(RichText::new("⚠ out of date").small().color(Color32::from_rgb(217, 119, 6)))
+                        .on_hover_text("The site, antenna, height, frequency or model changed since this plot ran: press Plot coverage");
                 }
             });
             if r.clicked() {
@@ -1009,6 +1121,7 @@ impl App {
         if let Some(i) = select {
             if self.sel_plot != Some(i) {
                 self.confirm_delete_plot = false;
+                zoom = Some(i);
             }
             self.sel_plot = Some(i);
             if let Some(si) = self.lib.sites.iter().position(|s| s.id == self.lib.plots[i].site_id) {
@@ -1023,6 +1136,8 @@ impl App {
         let Some(i) = self.sel_plot else { return };
         ui.add_space(6.0);
         let busy = self.job.is_some();
+        let stale_sel = self.stale.contains(&self.lib.plots[i].id);
+        let done_sel = self.results.contains_key(&self.lib.plots[i].id);
         let general = self.settings.model.radius_km;
         let mut copy = false;
         let mut delete = false;
@@ -1219,6 +1334,13 @@ impl App {
                     self.start_plot();
                 }
             });
+            if !busy {
+                if stale_sel {
+                    ui.label(RichText::new("⚠ The site, antenna, height, frequency or model changed since this plot ran. Press Plot coverage to update it.").small().color(Color32::from_rgb(217, 119, 6)));
+                } else if done_sel {
+                    ui.label(RichText::new("Power, feeder loss, gains, losses, mode, surroundings and spots covered update the map straight away.").small().weak());
+                }
+            }
             ui.add_space(4.0);
             ui.separator();
             self.save_bar(ui);
@@ -1355,10 +1477,9 @@ impl App {
         }
         let tint = Color32::from_white_alpha((self.settings.opacity * 255.0) as u8);
         self.map_size = proj.rect.size();
-        for s in &self.lib.plots {
-            if !show_cov || self.settings.hidden.contains(&s.id) {
-                continue;
-            }
+        let shown = if show_cov { self.on_map() } else { vec![] };
+        for &pi in &shown {
+            let s = &self.lib.plots[pi];
             let Some(p) = self.results.get_mut(&s.id) else { continue };
             let m = &p.cov.meta;
             let tex = p.tex.get_or_insert_with(|| {
@@ -1411,6 +1532,7 @@ impl App {
                     self.status = "Site placed. Drag the pin to fine-tune it.".into();
                 } else if let Some((i, _)) = pin_rects.iter().rev().find(|(_, r)| r.contains(p)) {
                     self.selected = Some(*i);
+                    self.follow_site();
                     self.popup = None;
                 } else if show_cov {
                     self.popup = Some(Popup { lat, lon });
@@ -1424,15 +1546,11 @@ impl App {
             }
         }
         self.popup_window(&ctx, &proj);
-        let mut legend_levels = None;
-        for s in &self.lib.plots {
-            if let Some(p) = self.results.get(&s.id) {
-                if !self.settings.hidden.contains(&s.id) {
-                    legend_levels = Some((p.cov.meta.mode.clone(), p.cov.meta.levels.clone()));
-                    break;
-                }
-            }
-        }
+        let legend_levels = shown.last().and_then(|&i| self.results.get(&self.lib.plots[i].id)).map(|p| {
+            let name = &self.lib.plots[shown[shown.len() - 1]].name;
+            (if p.cov.meta.mode.is_empty() { name.clone() } else { format!("{name} · {}", p.cov.meta.mode) }, p.cov.meta.levels.clone())
+        });
+        let mut legend_levels = legend_levels;
         if !show_cov {
             legend_levels = None;
             if !self.results.is_empty() {
@@ -1458,10 +1576,8 @@ impl App {
             return;
         }
         let mut infos = vec![];
-        for s in &self.lib.plots {
-            if self.settings.hidden.contains(&s.id) {
-                continue;
-            }
+        for i in self.on_map().into_iter().rev() {
+            let s = &self.lib.plots[i];
             if let Some(p) = self.results.get(&s.id) {
                 if let Some(q) = p.cov.query(lat, lon) {
                     infos.push((s.name.clone(), q));
@@ -1552,6 +1668,14 @@ impl App {
         }
     }
 
+    /// For automated tests: choose a plot, and its site, as a click on the list does.
+    pub fn select_plot(&mut self, i: usize) {
+        if i < self.lib.plots.len() {
+            self.sel_plot = Some(i);
+            self.selected = self.lib.sites.iter().position(|s| s.id == self.lib.plots[i].site_id);
+        }
+    }
+
     /// For automated tests: press Save at start-up.
     pub fn save_on_start(&mut self) {
         self.save();
@@ -1574,6 +1698,7 @@ impl eframe::App for App {
         crate::theme::frame(&ctx);
         self.frame += 1;
         self.poll();
+        self.sync_results(&ctx);
         while let Ok(n) = self.notes_rx.try_recv() {
             self.status = n;
             if !self.status.starts_with("Removed") {

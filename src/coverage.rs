@@ -77,6 +77,10 @@ pub struct Meta {
     /// the operating mode the levels were set for (empty in older plots)
     #[serde(default)]
     pub mode: String,
+    /// everything that shapes the propagation (site, antenna, height, frequency, model):
+    /// if it changes the plot must be run again (empty in older plots)
+    #[serde(default)]
+    pub geometry: String,
     pub site_lat: f64,
     pub site_lon: f64,
     pub radius_km: f64,
@@ -270,45 +274,7 @@ pub fn run(site: &Site, st: &Station, settings: &Settings, terrain: &Terrain, pr
     let sy = lonlat_to_px(slon, sl_, zoom).1;
     let (x0, x1, y0, y1) = (wx.floor(), ex.ceil(), ny.floor(), sy.ceil());
     let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
-    let mut img = image::RgbaImage::new(w, h);
-    let mut counts = vec![0usize; nl];
-    let rows: Vec<(Vec<u8>, Vec<usize>)> = (0..h)
-        .into_par_iter()
-        .map(|py| {
-            let mut row = vec![0u8; w as usize * 4];
-            let mut cnt = vec![0usize; nl];
-            for px in 0..w {
-                let (lon, lat) = px_to_lonlat(x0 + px as f64 + 0.5, y0 + py as f64 + 0.5, zoom);
-                let (d, b) = distance_bearing(lat0, lon0, lat, lon);
-                let ki = (d / xi).round() as usize;
-                if ki > n_steps || ki == 0 {
-                    continue;
-                }
-                let ri = (b / (360.0 / n_rad as f64)).round() as usize % n_rad;
-                let mut best = None;
-                for li in (0..nl).rev() {
-                    let s = signal[(li * n_rad + ri) * npts + ki];
-                    if s as f64 >= levels[li].required_dbm {
-                        best = Some(li);
-                        cnt[li] += 1;
-                    }
-                }
-                if let Some(li) = best {
-                    let c = levels[li].colour;
-                    row[px as usize * 4..px as usize * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
-                }
-            }
-            (row, cnt)
-        })
-        .collect();
-    for (py, (row, cnt)) in rows.into_iter().enumerate() {
-        img.as_mut()[py * w as usize * 4..(py + 1) * w as usize * 4].copy_from_slice(&row);
-        for (a, b) in counts.iter_mut().zip(cnt) {
-            *a += b;
-        }
-    }
-    let px_area = metres_per_px(lat0, zoom).powi(2) / 1e6;
-    let stats = levels.iter().zip(&counts).map(|(l, &c)| Stats { name: l.name.clone(), area_km2: c as f64 * px_area, colour: l.colour }).collect();
+    let img_geom = (zoom, x0, y0, w, h);
     let meta = Meta {
         mode: String::new(),
         site_lat: lat0,
@@ -322,15 +288,18 @@ pub fn run(site: &Site, st: &Station, settings: &Settings, terrain: &Terrain, pr
         eirp_dbm: eirp,
         seconds: t0.elapsed().as_secs_f64(),
         levels,
-        stats,
-        img_zoom: zoom,
-        img_x0: x0,
-        img_y0: y0,
-        img_w: w,
-        img_h: h,
+        stats: vec![],
+        img_zoom: img_geom.0,
+        img_x0: img_geom.1,
+        img_y0: img_geom.2,
+        img_w: img_geom.3,
+        img_h: img_geom.4,
         created: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        geometry: String::new(),
     };
-    Ok(Coverage { meta, image: img, signal, loss, mode, z: zf })
+    let mut c = Coverage { meta, image: image::RgbaImage::new(1, 1), signal, loss, mode, z: zf };
+    c.draw();
+    Ok(c)
 }
 
 /// What the plot says about one point.
@@ -344,6 +313,89 @@ pub struct PointInfo {
 }
 
 impl Coverage {
+    /// Colour the map image and count the areas from the signals and the levels' needs.
+    pub fn draw(&mut self) {
+        let m = &self.meta;
+        let (lat0, lon0, xi, n_steps, n_rad) = (m.site_lat, m.site_lon, m.step_m, m.n_steps, m.n_rad);
+        let (zoom, x0, y0, w, h) = (m.img_zoom, m.img_x0, m.img_y0, m.img_w, m.img_h);
+        let levels = &m.levels;
+        let nl = levels.len();
+        let npts = n_steps + 1;
+        let signal = &self.signal;
+        let mut img = image::RgbaImage::new(w, h);
+        let mut counts = vec![0usize; nl];
+        let rows: Vec<(Vec<u8>, Vec<usize>)> = (0..h)
+            .into_par_iter()
+            .map(|py| {
+                let mut row = vec![0u8; w as usize * 4];
+                let mut cnt = vec![0usize; nl];
+                for px in 0..w {
+                    let (lon, lat) = px_to_lonlat(x0 + px as f64 + 0.5, y0 + py as f64 + 0.5, zoom);
+                    let (d, b) = distance_bearing(lat0, lon0, lat, lon);
+                    let ki = (d / xi).round() as usize;
+                    if ki > n_steps || ki == 0 {
+                        continue;
+                    }
+                    let ri = (b / (360.0 / n_rad as f64)).round() as usize % n_rad;
+                    let mut best = None;
+                    for li in (0..nl).rev() {
+                        let s = signal[(li * n_rad + ri) * npts + ki];
+                        if s as f64 >= levels[li].required_dbm {
+                            best = Some(li);
+                            cnt[li] += 1;
+                        }
+                    }
+                    if let Some(li) = best {
+                        let c = levels[li].colour;
+                        row[px as usize * 4..px as usize * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                }
+                (row, cnt)
+            })
+            .collect();
+        for (py, (row, cnt)) in rows.into_iter().enumerate() {
+            img.as_mut()[py * w as usize * 4..(py + 1) * w as usize * 4].copy_from_slice(&row);
+            for (a, b) in counts.iter_mut().zip(cnt) {
+                *a += b;
+            }
+        }
+        let px_area = metres_per_px(lat0, zoom).powi(2) / 1e6;
+        self.meta.stats = levels.iter().zip(&counts).map(|(l, &c)| Stats { name: l.name.clone(), area_km2: c as f64 * px_area, colour: l.colour }).collect();
+        self.image = img;
+    }
+
+    /// Bring the plot up to date with new power, gains, losses or needs, which only move the
+    /// received signal up or down: no new propagation run. False if the levels don't line up.
+    pub fn adjust(&mut self, eirp_dbm: f64, levels: &[Level]) -> bool {
+        let m = &self.meta;
+        if levels.len() != m.levels.len() || levels.iter().zip(&m.levels).any(|(a, b)| a.name != b.name || a.height_m != b.height_m) {
+            return false;
+        }
+        let per = m.n_rad * (m.n_steps + 1);
+        for (li, (new, old)) in levels.iter().zip(&m.levels).enumerate() {
+            let delta = ((eirp_dbm - m.eirp_dbm) + (new.gain_dbi - old.gain_dbi) - (new.loss_db - old.loss_db)) as f32;
+            if delta != 0.0 {
+                for v in &mut self.signal[li * per..(li + 1) * per] {
+                    *v += delta;
+                }
+            }
+        }
+        self.meta.eirp_dbm = eirp_dbm;
+        self.meta.levels = levels.to_vec();
+        self.draw();
+        true
+    }
+
+    /// True if `adjust` would change anything.
+    pub fn differs(&self, eirp_dbm: f64, levels: &[Level]) -> bool {
+        let m = &self.meta;
+        (eirp_dbm - m.eirp_dbm).abs() > 1e-6
+            || levels.len() != m.levels.len()
+            || levels.iter().zip(&m.levels).any(|(a, b)| {
+                (a.gain_dbi - b.gain_dbi).abs() > 1e-6 || (a.loss_db - b.loss_db).abs() > 1e-6 || (a.required_dbm - b.required_dbm).abs() > 1e-6 || a.colour != b.colour
+            })
+    }
+
     pub fn query(&self, lat: f64, lon: f64) -> Option<PointInfo> {
         let m = &self.meta;
         let (d, b) = distance_bearing(m.site_lat, m.site_lon, lat, lon);
@@ -437,3 +489,34 @@ mod margin_tests {
     }
 }
 
+
+#[cfg(test)]
+mod adjust_tests {
+    use super::*;
+
+    fn level(gain: f64, loss: f64, req: f64) -> Level {
+        Level { name: "Hand portable".into(), height_m: 1.5, gain_dbi: gain, loss_db: loss, required_dbm: req, colour: [0, 0, 255] }
+    }
+
+    #[test]
+    fn power_and_loss_changes_shift_the_signal() {
+        let meta = Meta {
+            mode: String::new(), geometry: "g".into(), site_lat: 52.0, site_lon: 0.0, radius_km: 1.0, n_rad: 4, n_steps: 2,
+            step_m: 500.0, dem_res_m: 30.0, site_ground_m: 0.0, eirp_dbm: 40.0, seconds: 0.0,
+            levels: vec![level(0.0, 6.0, -110.0)], stats: vec![], img_zoom: 10.0, img_x0: 0.0, img_y0: 0.0, img_w: 1, img_h: 1, created: 0,
+        };
+        let mut c = Coverage { meta, image: image::RgbaImage::new(1, 1), signal: vec![-100.0; 12], loss: vec![0.0; 12], mode: vec![0; 12], z: vec![0.0; 12] };
+        let new = [level(-5.0, 4.0, -116.0)];
+        assert!(c.differs(43.0, &new));
+        assert!(c.adjust(43.0, &new));
+        // +3 dB power, -5 dB gain, 2 dB less loss: 0 dB overall
+        assert!((c.signal[0] - -100.0).abs() < 1e-4);
+        assert!(!c.differs(43.0, &new));
+        assert!(c.adjust(33.0, &new));
+        assert!((c.signal[5] - -110.0).abs() < 1e-4);
+        // a level at another height can't be shifted
+        let mut h = new[0].clone();
+        h.height_m = 3.0;
+        assert!(!c.adjust(33.0, &[h]));
+    }
+}
