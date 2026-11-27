@@ -1,0 +1,20 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Fri, 27 Nov 2026 15:32:36 +0000
+Description: Coverant radio coverage planner
+Label: coverant
+Origin: coverant
+Suite: stable
+MD5Sum:
+ 3cac7a9b6ea601b8756c17b4f02b3863             1978 main/binary-amd64/Packages
+ b522709c2a8c16a93f774ee0eacab6cf              859 main/binary-amd64/Packages.gz
+SHA1:
+ 2ba4c5767a4aa10f1add973a55e3bcf20d8e83eb             1978 main/binary-amd64/Packages
+ 2322297983943049cc95c44dafa15cc1b589d996              859 main/binary-amd64/Packages.gz
+SHA256:
+ e7c1bd3d0dd02e0d90d8be58d5e4e5b10cc7b4715e3dde30752c81d00051e22b             1978 main/binary-amd64/Packages
+ d4e3ba3b2961ce2080804a295354f2d4b31d0af4124cad8d66b4389a314f337a              859 main/binary-amd64/Packages.gz
+SHA512:
+ d923bde34966f9b88d47080cbbc4be6b9f8cc802e52e4f3b2483b1c755fdbcfb7d6449c658cf43d79382d62eba1ec180e672846eaa852f6eec5d8334ead303c4             1978 main/binary-amd64/Packages
+ 19b3eba7f79cdde46dcde6c01d3ee2a1d056cddef5672fdc699ad5bd6b5160e04dc943be2fbef30f2933d0b74c1e5a267326311afacb72d119956d8bc75e3cee              859 main/binary-amd64/Packages.gz

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Coverant APT repository</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:sans-serif;max-width:46em;margin:2em auto;padding:0 1em">
+<h1>Coverant APT repository</h1>
+<p>For Ubuntu 22.04 and later, Debian 12 and later, Linux Mint 21 and later, Zorin 17, Pop!_OS 22.04 (64-bit PC).
+Add it once, and Coverant updates with the rest of the system:</p>
+<pre>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://tanganyika.github.io/coverant/apt/coverant.gpg | sudo tee /etc/apt/keyrings/coverant.gpg &gt;/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/coverant.gpg] https://tanganyika.github.io/coverant/apt stable main" | sudo tee /etc/apt/sources.list.d/coverant.list
+sudo apt update
+sudo apt install coverant</pre>
+<p>Packages: coverant_0.4.0-1_amd64.deb coverant_0.4.1-1_amd64.deb </p>
+<p><a href="https://github.com/tanganyika/coverant">Coverant on GitHub</a></p>
+</body></html>
